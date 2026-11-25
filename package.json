@@ -1,7 +1,7 @@
 {
   "name": "@xelorra/identity",
   "version": "1.0.0",
-  "description": "Official Xelorra Identity OAuth 2.0 + PKCE, Reusable KYC, and React SDK for web and mobile applications.",
+  "description": "Official Xelorra Identity OAuth 2.0 + OIDC + PKCE, webhook verification, and React/Express/Next.js SDK.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -14,6 +14,14 @@
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
+    },
+    "./express": {
+      "types": "./dist/express.d.ts",
+      "import": "./dist/express.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "import": "./dist/next.js"
     }
   },
   "files": [
@@ -21,8 +29,10 @@
     "README.md"
   ],
   "scripts": {
+    "dev": "node dev-server.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
     "test": "tsx --test src/client.test.ts"
   },
   "peerDependencies": {
@@ -34,10 +44,14 @@
     }
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.10",
     "@types/react": "^19.0.0",
+    "eslint": "^10.15.0",
     "react": "^19.0.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.74.0"
   },
   "license": "MIT"
 }
