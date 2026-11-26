@@ -1,8 +1,11 @@
 {
   "name": "@xelorra/identity",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "Official multi-stack Xelorra Identity SDK for OAuth 2.0, OIDC, PKCE S256, Reusable KYC assertions, Digital Passport verification, and signed webhooks on https://one.xelorra.app.",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "./dist/cjs/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -31,14 +34,18 @@
   "files": [
     "dist",
     "docs",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md"
   ],
   "scripts": {
     "dev": "node dev-server.mjs",
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finalize-cjs.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
-    "test": "tsx --test src/client.test.ts"
+    "test": "tsx --test src/client.test.ts",
+    "prepublishOnly": "npm run build && npm run test"
   },
   "peerDependencies": {
     "react": ">=18.0.0"
@@ -57,6 +64,31 @@
     "tsx": "^4.19.2",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.74.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "xelorra",
+    "xelorra-id",
+    "oauth2",
+    "oidc",
+    "pkce",
+    "kyc",
+    "identity",
+    "webhooks",
+    "react",
+    "nextjs",
+    "express"
+  ],
+  "homepage": "https://one.xelorra.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xelorra/xelorra-identity-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xelorra/xelorra-identity-sdk/issues"
   },
   "license": "MIT"
 }

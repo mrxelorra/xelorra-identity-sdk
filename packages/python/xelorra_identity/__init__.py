@@ -36,7 +36,10 @@ from .webhooks import (
     verify_webhook_signature,
 )
 
+__version__ = "1.0.0"
+
 __all__ = [
+    "__version__",
     "DEFAULT_ISSUER",
     "DEFAULT_SCOPES",
     "DEFAULT_WEBHOOK_TOLERANCE_SECONDS",

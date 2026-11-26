@@ -3,3 +3,14 @@ dist
 *.tgz
 npm-debug.log*
 .DS_Store
+.env
+.env.*
+!.env.example
+.aistudio
+.playwright-cli
+__pycache__/
+*.pyc
+*.egg-info/
+packages/python/build/
+packages/python/dist/
+packages/php/vendor/

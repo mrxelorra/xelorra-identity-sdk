@@ -330,11 +330,33 @@ func (c *Client) IntrospectToken(ctx context.Context, accessToken string) (*Intr
 		payload["client_secret"] = c.ClientSecret
 	}
 
-	var out IntrospectionResult
-	if err := c.doJSON(ctx, http.MethodPost, "/oauth/introspect", nil, payload, &out, false); err != nil {
+	var rawResp struct {
+		Active    bool    `json:"active"`
+		Connected *bool   `json:"connected"`
+		ClientID  *string `json:"client_id,omitempty"`
+		Sub       *string `json:"sub,omitempty"`
+		XID       *string `json:"xid,omitempty"`
+		Scope     *string `json:"scope,omitempty"`
+		Exp       *int64  `json:"exp,omitempty"`
+		Reason    *string `json:"reason,omitempty"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/oauth/introspect", nil, payload, &rawResp, false); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	connected := rawResp.Active
+	if rawResp.Connected != nil {
+		connected = *rawResp.Connected
+	}
+	return &IntrospectionResult{
+		Active:    rawResp.Active,
+		Connected: connected,
+		ClientID:  rawResp.ClientID,
+		Sub:       rawResp.Sub,
+		XID:       rawResp.XID,
+		Scope:     rawResp.Scope,
+		Exp:       rawResp.Exp,
+		Reason:    rawResp.Reason,
+	}, nil
 }
 
 // IsUserConnected returns true only when POST /oauth/introspect confirms active and connected.
@@ -521,7 +543,15 @@ func (c *Client) doJSON(
 		return &AccessRevokedError{Error: base}
 	}
 	if resp.StatusCode == http.StatusForbidden && errCode == "insufficient_scope" {
-		return &InsufficientScopeError{Error: base}
+		var required []string
+		if rawScopes, ok := details["required_scopes"].([]any); ok {
+			for _, item := range rawScopes {
+				if s, ok := item.(string); ok {
+					required = append(required, s)
+				}
+			}
+		}
+		return &InsufficientScopeError{Error: base, RequiredScopes: required}
 	}
 
 	return &base

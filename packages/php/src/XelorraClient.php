@@ -351,7 +351,7 @@ class XelorraClient
             'POST',
             '/api/v1/verify/assertion',
             ['Authorization' => 'Bearer ' . $trimmed],
-            []
+            new \stdClass()
         );
     }
 
@@ -416,14 +416,14 @@ class XelorraClient
 
     /**
      * @param array<string, string> $headers
-     * @param array<string, mixed>|null $jsonBody
+     * @param array<string, mixed>|object|null $jsonBody
      * @return array<string, mixed>
      */
     private function requestJson(
         string $method,
         string $path,
         array $headers = [],
-        ?array $jsonBody = null,
+        array|object|null $jsonBody = null,
         bool $allowInvalidPassportResponse = false
     ): array {
         $url = $this->issuer . $path;
