@@ -1,11 +1,22 @@
+import {
+  DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+  XELORRA_EVENT_HEADER,
+  XELORRA_EVENT_ID_HEADER,
+  XELORRA_SIGNATURE_HEADER,
+} from "./constants.js";
 import { XelorraWebhookSignatureError } from "./errors.js";
-import type { XelorraWebhookEvent } from "./types.js";
+import type { VerifyWebhookOptions, XelorraWebhookEvent } from "./types.js";
 
-/** Canonical HTTP header carrying the HMAC-SHA256 webhook signature from Xelorra One. */
-export const XELORRA_SIGNATURE_HEADER = "x-xelorra-signature";
+export { XELORRA_EVENT_HEADER, XELORRA_EVENT_ID_HEADER, XELORRA_SIGNATURE_HEADER };
 
-function toBytes(input: string | Uint8Array): Uint8Array {
-  return typeof input === "string" ? new TextEncoder().encode(input) : input;
+interface ParsedSignatureHeader {
+  timestamp: number;
+  rawTimestamp: string;
+  v1Signatures: string[];
+}
+
+function rawBodyToString(rawBody: string | Uint8Array): string {
+  return typeof rawBody === "string" ? rawBody : new TextDecoder().decode(rawBody);
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -17,31 +28,20 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 function hexToBytes(hex: string): Uint8Array | null {
-  if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) {
+  if (hex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(hex)) {
     return null;
   }
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i += 1) {
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 32; i += 1) {
     out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
   return out;
 }
 
-function extractHexDigest(signatureHeader: string): string | null {
-  const trimmed = signatureHeader.trim();
-  if (!trimmed) return null;
-
-  // Support raw hex, "sha256=<hex>", or comma-separated key=value formats like "v1=<hex>"
-  const parts = trimmed.split(",").map((part) => part.trim());
-  for (const part of parts) {
-    const candidate = part.includes("=") ? part.slice(part.indexOf("=") + 1).trim() : part;
-    if (/^[0-9a-fA-F]{64}$/.test(candidate)) {
-      return candidate.toLowerCase();
-    }
-  }
-  return null;
-}
-
+/**
+ * Constant-time comparison over two equal-length byte arrays.
+ * Uses bitwise XOR accumulation so execution time does not depend on matching prefixes.
+ */
 function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
@@ -52,15 +52,17 @@ function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 async function computeHmacSha256Bytes(
-  rawBody: Uint8Array,
+  message: string,
   secret: string,
 ): Promise<Uint8Array> {
+  const messageBytes = new TextEncoder().encode(message);
+
   if (typeof globalThis.crypto !== "undefined" && globalThis.crypto.subtle) {
     const keyBytes = new TextEncoder().encode(secret);
     const keyCopy = new Uint8Array(keyBytes.byteLength);
     keyCopy.set(keyBytes);
-    const bodyCopy = new Uint8Array(rawBody.byteLength);
-    bodyCopy.set(rawBody);
+    const msgCopy = new Uint8Array(messageBytes.byteLength);
+    msgCopy.set(messageBytes);
 
     const cryptoKey = await globalThis.crypto.subtle.importKey(
       "raw",
@@ -69,99 +71,236 @@ async function computeHmacSha256Bytes(
       false,
       ["sign"],
     );
-    const signature = await globalThis.crypto.subtle.sign("HMAC", cryptoKey, bodyCopy.buffer);
+    const signature = await globalThis.crypto.subtle.sign("HMAC", cryptoKey, msgCopy.buffer);
     return new Uint8Array(signature);
   }
 
   const nodeCrypto = await import("node:crypto");
-  const digest = nodeCrypto.createHmac("sha256", secret).update(rawBody).digest();
+  const digest = nodeCrypto.createHmac("sha256", secret).update(messageBytes).digest();
   return new Uint8Array(digest);
 }
 
 /**
- * Computes the hex-encoded HMAC-SHA256 webhook signature for a raw request body.
- * Useful when writing integration tests for your webhook endpoint.
+ * Parses a `X-Xelorra-Signature` header of the exact format `t=<unix_seconds>,v1=<hmac_sha256_hex>`.
+ */
+export function parseSignatureHeader(signatureHeader: string): ParsedSignatureHeader | null {
+  const trimmed = signatureHeader.trim();
+  if (!trimmed) return null;
+
+  let rawTimestamp: string | null = null;
+  const v1Signatures: string[] = [];
+
+  for (const segment of trimmed.split(",")) {
+    const part = segment.trim();
+    if (!part) continue;
+    const eqIndex = part.indexOf("=");
+    if (eqIndex <= 0) return null;
+    const key = part.slice(0, eqIndex).trim();
+    const value = part.slice(eqIndex + 1).trim();
+    if (!value) return null;
+
+    if (key === "t") {
+      if (rawTimestamp !== null || !/^\d+$/.test(value)) {
+        return null;
+      }
+      rawTimestamp = value;
+    } else if (key === "v1") {
+      if (!/^[0-9a-fA-F]{64}$/.test(value)) {
+        return null;
+      }
+      v1Signatures.push(value.toLowerCase());
+    }
+  }
+
+  if (rawTimestamp === null || v1Signatures.length === 0) {
+    return null;
+  }
+
+  const timestamp = Number(rawTimestamp);
+  if (!Number.isSafeInteger(timestamp) || timestamp <= 0) {
+    return null;
+  }
+
+  return { timestamp, rawTimestamp, v1Signatures };
+}
+
+function normalizeWebhookArgs(
+  first: VerifyWebhookOptions | string | Uint8Array,
+  signatureHeader?: string | null,
+  signingSecret?: string,
+  toleranceSeconds?: number,
+): VerifyWebhookOptions {
+  if (
+    typeof first === "object" &&
+    first !== null &&
+    !(first instanceof Uint8Array) &&
+    "rawBody" in first
+  ) {
+    return first;
+  }
+  return {
+    rawBody: first,
+    signatureHeader,
+    signingSecret: signingSecret ?? "",
+    toleranceSeconds,
+  };
+}
+
+/**
+ * Generates an outbound `X-Xelorra-Signature` header value in the exact Xelorra One format:
+ * `t=<unix_timestamp_seconds>,v1=<hmac_sha256_hex>` where the signed payload is
+ * `"${t}.${rawBody}"`. Useful for local testing and webhook integration tests.
  */
 export async function computeWebhookSignature(
   rawBody: string | Uint8Array,
-  webhookSecret: string,
+  signingSecret: string,
+  timestampSeconds?: number,
 ): Promise<string> {
-  if (!webhookSecret) {
+  if (!signingSecret) {
     throw new XelorraWebhookSignatureError(
       "missing_webhook_secret",
-      "webhookSecret is required to compute a webhook signature.",
+      "signingSecret is required to compute a webhook signature.",
     );
   }
-  const digest = await computeHmacSha256Bytes(toBytes(rawBody), webhookSecret);
-  return bytesToHex(digest);
+  const ts =
+    typeof timestampSeconds === "number"
+      ? Math.floor(timestampSeconds)
+      : Math.floor(Date.now() / 1000);
+  const bodyText = rawBodyToString(rawBody);
+  const digest = await computeHmacSha256Bytes(`${ts}.${bodyText}`, signingSecret);
+  return `t=${ts},v1=${bytesToHex(digest)}`;
 }
 
-/**
- * Verifies the `X-Xelorra-Signature` HMAC-SHA256 header against the raw request body
- * using constant-time comparison.
- *
- * Accepts raw 64-character hex digests as well as prefixed formats such as `sha256=<hex>`.
- * Returns `false` for missing, malformed, or tampered signatures without throwing.
- */
-export async function verifyWebhookSignature(
-  rawBody: string | Uint8Array,
-  signatureHeader: string | null | undefined,
-  webhookSecret: string,
-): Promise<boolean> {
-  if (!webhookSecret || !signatureHeader) {
-    return false;
-  }
+async function verifySignatureInternal(options: VerifyWebhookOptions): Promise<{
+  ok: boolean;
+  errorCode?:
+    | "missing_webhook_secret"
+    | "missing_signature"
+    | "malformed_signature"
+    | "expired_timestamp"
+    | "invalid_signature";
+  errorMessage?: string;
+}> {
+  const {
+    rawBody,
+    signatureHeader,
+    signingSecret,
+    toleranceSeconds = DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+    nowSeconds = Math.floor(Date.now() / 1000),
+  } = options;
 
-  const providedHex = extractHexDigest(signatureHeader);
-  if (!providedHex) {
-    return false;
-  }
-
-  const providedBytes = hexToBytes(providedHex);
-  if (!providedBytes || providedBytes.length !== 32) {
-    return false;
-  }
-
-  const expectedBytes = await computeHmacSha256Bytes(toBytes(rawBody), webhookSecret);
-  return constantTimeEqual(providedBytes, expectedBytes);
-}
-
-/**
- * Verifies the `X-Xelorra-Signature` header and parses the raw webhook body into a
- * strongly typed `XelorraWebhookEvent` (including `user.access_revoked`).
- *
- * Throws `XelorraWebhookSignatureError` if the secret is missing, the signature header
- * is missing or invalid, or the JSON body does not match the Xelorra webhook envelope.
- */
-export async function parseWebhookEvent(
-  rawBody: string | Uint8Array,
-  signatureHeader: string | null | undefined,
-  webhookSecret: string,
-): Promise<XelorraWebhookEvent> {
-  if (!webhookSecret) {
-    throw new XelorraWebhookSignatureError(
-      "missing_webhook_secret",
-      "webhookSecret is required to verify Xelorra webhooks.",
-    );
+  if (!signingSecret) {
+    return {
+      ok: false,
+      errorCode: "missing_webhook_secret",
+      errorMessage: "signingSecret is required to verify Xelorra webhooks.",
+    };
   }
 
   if (!signatureHeader || !signatureHeader.trim()) {
+    return {
+      ok: false,
+      errorCode: "missing_signature",
+      errorMessage: "Missing X-Xelorra-Signature header.",
+    };
+  }
+
+  const parsed = parseSignatureHeader(signatureHeader);
+  if (!parsed) {
+    return {
+      ok: false,
+      errorCode: "malformed_signature",
+      errorMessage:
+        "X-Xelorra-Signature header must follow the format 't=<unix_timestamp>,v1=<hmac_sha256_hex>'.",
+    };
+  }
+
+  if (toleranceSeconds > 0 && Math.abs(nowSeconds - parsed.timestamp) > toleranceSeconds) {
+    return {
+      ok: false,
+      errorCode: "expired_timestamp",
+      errorMessage: `Webhook timestamp is outside the allowed ${toleranceSeconds}s tolerance window.`,
+    };
+  }
+
+  const signedPayload = `${parsed.rawTimestamp}.${rawBodyToString(rawBody)}`;
+  const expectedBytes = await computeHmacSha256Bytes(signedPayload, signingSecret);
+
+  let matched = false;
+  for (const hexSig of parsed.v1Signatures) {
+    const providedBytes = hexToBytes(hexSig);
+    if (providedBytes && constantTimeEqual(providedBytes, expectedBytes)) {
+      matched = true;
+    }
+  }
+
+  if (!matched) {
+    return {
+      ok: false,
+      errorCode: "invalid_signature",
+      errorMessage: "X-Xelorra-Signature verification failed.",
+    };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Verifies the `X-Xelorra-Signature` header (`t=<unix_seconds>,v1=<hmac_sha256_hex>`)
+ * against the exact raw request body using constant-time comparison and replay-window
+ * timestamp validation (default 300 seconds).
+ *
+ * Returns `false` for missing, malformed, expired, or tampered signatures without throwing.
+ */
+export async function verifyWebhookSignature(options: VerifyWebhookOptions): Promise<boolean>;
+export async function verifyWebhookSignature(
+  rawBody: string | Uint8Array,
+  signatureHeader: string | null | undefined,
+  signingSecret: string,
+  toleranceSeconds?: number,
+): Promise<boolean>;
+export async function verifyWebhookSignature(
+  first: VerifyWebhookOptions | string | Uint8Array,
+  signatureHeader?: string | null,
+  signingSecret?: string,
+  toleranceSeconds?: number,
+): Promise<boolean> {
+  const options = normalizeWebhookArgs(first, signatureHeader, signingSecret, toleranceSeconds);
+  const result = await verifySignatureInternal(options);
+  return result.ok;
+}
+
+/**
+ * Verifies the `X-Xelorra-Signature` header (`t=<unix_seconds>,v1=<hmac_sha256_hex>`)
+ * with replay-window enforcement and parses the raw webhook body into a strongly typed
+ * `XelorraWebhookEvent`.
+ *
+ * Throws `XelorraWebhookSignatureError` if the secret is missing, the signature is missing,
+ * malformed, expired, or invalid, or the JSON envelope is malformed.
+ */
+export async function parseWebhookEvent(options: VerifyWebhookOptions): Promise<XelorraWebhookEvent>;
+export async function parseWebhookEvent(
+  rawBody: string | Uint8Array,
+  signatureHeader: string | null | undefined,
+  signingSecret: string,
+  toleranceSeconds?: number,
+): Promise<XelorraWebhookEvent>;
+export async function parseWebhookEvent(
+  first: VerifyWebhookOptions | string | Uint8Array,
+  signatureHeader?: string | null,
+  signingSecret?: string,
+  toleranceSeconds?: number,
+): Promise<XelorraWebhookEvent> {
+  const options = normalizeWebhookArgs(first, signatureHeader, signingSecret, toleranceSeconds);
+  const check = await verifySignatureInternal(options);
+  if (!check.ok) {
     throw new XelorraWebhookSignatureError(
-      "missing_signature",
-      "Missing X-Xelorra-Signature header.",
+      check.errorCode ?? "invalid_signature",
+      check.errorMessage ?? "X-Xelorra-Signature verification failed.",
     );
   }
 
-  const valid = await verifyWebhookSignature(rawBody, signatureHeader, webhookSecret);
-  if (!valid) {
-    throw new XelorraWebhookSignatureError(
-      "invalid_signature",
-      "X-Xelorra-Signature verification failed.",
-    );
-  }
-
-  const bodyText =
-    typeof rawBody === "string" ? rawBody : new TextDecoder().decode(rawBody);
+  const bodyText = rawBodyToString(options.rawBody);
 
   let parsed: unknown;
   try {

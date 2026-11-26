@@ -702,8 +702,11 @@ const HTML_PAGE = `<!doctype html>
                     <button type="button" class="scope-btn" data-scope="phone.read" aria-pressed="false">
                       phone.read
                     </button>
-                    <button type="button" class="scope-btn" data-scope="kyc.assertion" aria-pressed="false">
-                      kyc.assertion
+                    <button type="button" class="scope-btn" data-scope="kyc.assertion.read" aria-pressed="false">
+                      kyc.assertion.read
+                    </button>
+                    <button type="button" class="scope-btn" data-scope="verification.read" aria-pressed="false">
+                      verification.read
                     </button>
                   </div>
                 </div>
@@ -902,11 +905,15 @@ const HTML_PAGE = `<!doctype html>
                     <tr>
                       <td>@xelorra/identity</td>
                       <td>
-                        <code>XelorraClient</code>, <code>XelorraAuth</code>,
-                        <code>createPkcePair</code>, <code>buildAuthorizeUrl</code>,
-                        <code>buildSignUpUrl</code>, <code>exchangeCodeForTokens</code>,
-                        <code>refreshTokens</code>, <code>getUserInfo</code>,
-                        <code>introspectToken</code>, <code>revokeToken</code>,
+                        <code>XelorraClient</code>, <code>XELORRA_SCOPES</code>,
+                        <code>XELORRA_WEBHOOK_EVENTS</code>, <code>createPkcePair</code>,
+                        <code>buildSignInUrl</code>, <code>buildSignUpUrl</code>,
+                        <code>exchangeCodeForTokens</code>, <code>refreshTokens</code>,
+                        <code>getUserInfo</code>, <code>introspectToken</code>,
+                        <code>isUserConnected</code>, <code>revokeToken</code>,
+                        <code>logout</code>, <code>verifyKycAssertion</code>,
+                        <code>verifyPassportToken</code>, <code>checkXidAvailability</code>,
+                        <code>fetchDiscovery</code>, <code>fetchJwks</code>,
                         <code>verifyWebhookSignature</code>, <code>parseWebhookEvent</code>,
                         <code>createDisconnectGuard</code>
                       </td>
@@ -915,7 +922,8 @@ const HTML_PAGE = `<!doctype html>
                       <td>@xelorra/identity/react</td>
                       <td>
                         <code>XelorraProvider</code>, <code>useXelorraAuth</code>,
-                        <code>XelorraAuthButton</code>
+                        <code>useXelorraCallback</code>, <code>XelorraSignInButton</code>,
+                        <code>XelorraSignUpButton</code>, <code>XelorraAuthButton</code>
                       </td>
                     </tr>
                     <tr>
@@ -929,7 +937,9 @@ const HTML_PAGE = `<!doctype html>
                     <tr>
                       <td>@xelorra/identity/next</td>
                       <td>
+                        <code>createNextAuthRedirectHandler</code>,
                         <code>createNextCallbackHandler</code>,
+                        <code>createNextSessionGuard</code>,
                         <code>createNextWebhookHandler</code>
                       </td>
                     </tr>
@@ -1134,7 +1144,7 @@ const xelorra = new XelorraClient({
         clientId: "acme-web-app",
         redirectUri: window.location.origin + "/callback",
         issuer: window.location.origin + "/mock",
-        scopes: ["profile.read", "passport.read", "kyc.assertion"],
+        scopes: ["profile.read", "passport.read", "kyc.assertion.read"],
       });
 
       const metricTokenState = document.getElementById("metric-token-state");
@@ -1151,7 +1161,7 @@ const xelorra = new XelorraClient({
 
       const disconnectGuard = createDisconnectGuard({
         client: flowClient,
-        getToken: () => flowClient.getAccessToken(),
+        getAccessToken: () => flowClient.getAccessToken(),
         onRevoked: ({ reason }) => {
           metricTokenState.textContent = "Revoked";
           flowAccessToken.textContent = "None";
@@ -1190,7 +1200,7 @@ const xelorra = new XelorraClient({
             codeVerifier: pkce.codeVerifier,
           });
           const check = await disconnectGuard.check();
-          const assertion = await flowClient.getVerificationAssertion();
+          const assertion = await flowClient.verifyKycAssertion();
           metricTokenState.textContent = "Active (memory)";
           flowAccessToken.textContent = tokens.access_token;
           flowUser.textContent = user.name + " (" + user.sub + ")";
@@ -1199,7 +1209,7 @@ const xelorra = new XelorraClient({
           flowKyc.textContent =
             assertion.verification_status +
             " · " +
-            assertion.verification_level +
+            assertion.verification_type +
             " · " +
             assertion.verification_reference;
           btnIntrospect.disabled = false;
@@ -1270,9 +1280,10 @@ const xelorra = new XelorraClient({
           id: "evt_01JXYZ849201",
           type: "user.access_revoked",
           created_at: new Date().toISOString(),
+          client_id: "acme-web-app",
           data: {
-            sub: "xlr_app_7c91e4f02b8a",
             xid: "XLR-9284-1039",
+            sub: "xapp_7c91e4f02b8a",
             client_id: "acme-web-app",
             revoked_at: new Date().toISOString(),
             reason: "user_disconnected",
@@ -1286,15 +1297,15 @@ const xelorra = new XelorraClient({
       async function verifyCurrentWebhook() {
         whStatus.classList.remove("error");
         try {
-          const event = await parseWebhookEvent(
-            whBody.value,
-            whSignature.value,
-            whSecret.value,
-          );
-          whResultValid.textContent = "Valid HMAC-SHA256 signature";
+          const event = await parseWebhookEvent({
+            rawBody: whBody.value,
+            signatureHeader: whSignature.value,
+            signingSecret: whSecret.value,
+          });
+          whResultValid.textContent = "Valid t=<ts>,v1=<hex> HMAC-SHA256 signature";
           whResultType.textContent = event.type;
           whResultData.textContent = JSON.stringify(event.data);
-          whStatus.textContent = "Webhook verified and parsed cleanly.";
+          whStatus.textContent = "Webhook verified (timestamp + HMAC-SHA256) and parsed cleanly.";
         } catch (err) {
           whResultValid.textContent = "Rejected (" + (err.code || "error") + ")";
           whResultType.textContent = "None";
@@ -1306,7 +1317,7 @@ const xelorra = new XelorraClient({
 
       async function signCurrentWebhook() {
         const sig = await computeWebhookSignature(whBody.value, whSecret.value);
-        whSignature.value = "sha256=" + sig;
+        whSignature.value = sig;
         await verifyCurrentWebhook();
       }
 
@@ -1453,7 +1464,7 @@ const server = createServer(async (req, res) => {
         refresh_token: `xlr_rt_${randomBytes(8).toString("hex")}`,
         token_type: "Bearer",
         expires_in: 3600,
-        scope: "profile.read passport.read kyc.assertion",
+        scope: "profile.read passport.read kyc.assertion.read",
         xid: "XLR-9284-1039",
       });
       return;
@@ -1473,8 +1484,7 @@ const server = createServer(async (req, res) => {
         refresh_token: `xlr_rt_rot_${randomBytes(8).toString("hex")}`,
         token_type: "Bearer",
         expires_in: 3600,
-        scope: "profile.read passport.read kyc.assertion",
-        xid: "XLR-9284-1039",
+        scope: "profile.read passport.read kyc.assertion.read",
       });
       return;
     }
@@ -1499,7 +1509,7 @@ const server = createServer(async (req, res) => {
       return;
     }
     sendJson(res, 200, {
-      sub: "xlr_app_7c91e4f02b8a",
+      sub: "xapp_7c91e4f02b8a",
       xid: "XLR-9284-1039",
       name: "Adaeze Okafor",
       email: "adaeze@example.com",
@@ -1516,12 +1526,7 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, {
         active: false,
         connected: false,
-        client_id: body.client_id || "acme-web-app",
-        sub: null,
-        xid: null,
-        scope: null,
-        exp: null,
-        reason: revokedTokens.has(token) ? "user_disconnected" : "inactive",
+        reason: revokedTokens.has(token) ? "access_revoked" : "missing_token",
       });
       return;
     }
@@ -1529,16 +1534,15 @@ const server = createServer(async (req, res) => {
       active: true,
       connected: true,
       client_id: body.client_id || "acme-web-app",
-      sub: "xlr_app_7c91e4f02b8a",
+      sub: "xapp_7c91e4f02b8a",
       xid: "XLR-9284-1039",
-      scope: "profile.read passport.read kyc.assertion",
+      scope: "profile.read passport.read kyc.assertion.read",
       exp: Math.floor(Date.now() / 1000) + 3600,
-      reason: null,
     });
     return;
   }
 
-  if (pathname === "/mock/api/v1/verify/assertion" && req.method === "GET") {
+  if (pathname === "/mock/api/v1/verify/assertion" && req.method === "POST") {
     const authHeader = req.headers.authorization || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
     if (!token.startsWith("xc_at_")) {
@@ -1550,13 +1554,11 @@ const server = createServer(async (req, res) => {
       return;
     }
     sendJson(res, 200, {
-      assertion: {
-        verification_status: "verified",
-        verification_level: "government_verified",
-        verification_reference: "xvr_8492019482",
-        verified_at: new Date().toISOString(),
-        country: "Nigeria",
-      },
+      verification_status: "verified",
+      verification_type: "government_identity",
+      verification_reference: "xvr_8492019482",
+      verified_at: new Date().toISOString(),
+      credential_category: "nin",
     });
     return;
   }
@@ -1566,17 +1568,22 @@ const server = createServer(async (req, res) => {
     if (typeof body.token === "string" && body.token) {
       revokedTokens.add(body.token);
     }
-    res.writeHead(200);
-    res.end();
+    sendJson(res, 200, { revoked: true });
+    return;
+  }
+
+  if (pathname === "/mock/oauth/logout" && req.method === "POST") {
+    sendJson(res, 200, { loggedOut: true, message: "Signed out of Xelorra One." });
     return;
   }
 
   if (pathname === "/mock/webhooks/sign" && req.method === "POST") {
     const body = await readJsonBody(req);
+    const ts = Math.floor(Date.now() / 1000);
     const sig = createHmac("sha256", String(body.secret || ""))
-      .update(String(body.payload || ""))
+      .update(`${ts}.${String(body.payload || "")}`)
       .digest("hex");
-    sendJson(res, 200, { signature: `sha256=${sig}` });
+    sendJson(res, 200, { signature: `t=${ts},v1=${sig}` });
     return;
   }
 

@@ -1,5 +1,5 @@
 import type { XelorraClient } from "./client.js";
-import { XelorraAccessRevokedError } from "./errors.js";
+import { XelorraAccessRevokedError, XelorraAuthError } from "./errors.js";
 import type { XelorraIntrospectionResult } from "./types.js";
 
 export interface DisconnectGuardRevokedInfo<TContext = void> {
@@ -13,7 +13,11 @@ export interface DisconnectGuardOptions<TContext = void> {
   /** Configured `XelorraClient` used to call `POST /oauth/introspect`. */
   client: XelorraClient;
   /** Resolves the user's current Xelorra access token for the given request or app context. */
-  getToken: (
+  getAccessToken?: (
+    context: TContext,
+  ) => string | null | undefined | Promise<string | null | undefined>;
+  /** Backwards-compatible alias for `getAccessToken`. */
+  getToken?: (
     context: TContext,
   ) => string | null | undefined | Promise<string | null | undefined>;
   /**
@@ -60,7 +64,17 @@ export interface DisconnectGuard<TContext = void> {
 export function createDisconnectGuard<TContext = void>(
   options: DisconnectGuardOptions<TContext>,
 ): DisconnectGuard<TContext> {
-  const { client, getToken, onRevoked, cacheTtlMs = 0 } = options;
+  const { client, getAccessToken, getToken, onRevoked, cacheTtlMs = 0 } = options;
+  const resolvedGetter = getAccessToken ?? getToken;
+
+  if (!resolvedGetter) {
+    throw new XelorraAuthError(
+      "invalid_config",
+      "createDisconnectGuard requires getAccessToken (or getToken).",
+    );
+  }
+  const tokenResolver = resolvedGetter;
+
   const cache = new Map<string, { result: XelorraIntrospectionResult; expiresAt: number }>();
 
   function invalidate(token?: string): void {
@@ -72,7 +86,7 @@ export function createDisconnectGuard<TContext = void>(
   }
 
   async function check(context: TContext): Promise<DisconnectGuardCheckResult> {
-    const token = (await getToken(context)) ?? null;
+    const token = (await tokenResolver(context)) ?? null;
     if (!token) {
       return { active: false, token: null, introspection: null };
     }
@@ -108,7 +122,7 @@ export function createDisconnectGuard<TContext = void>(
     context: TContext,
     operation: (token: string) => Promise<TResult>,
   ): Promise<TResult> {
-    const token = (await getToken(context)) ?? "";
+    const token = (await tokenResolver(context)) ?? "";
     try {
       return await operation(token);
     } catch (err) {

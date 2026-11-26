@@ -1,42 +1,71 @@
-import { XelorraAccessRevokedError, XelorraAuthError } from "./errors.js";
+import {
+  DEFAULT_XELORRA_ISSUER,
+  DEFAULT_XELORRA_SCOPES,
+  KYC_ASSERTION_SCOPES,
+} from "./constants.js";
+import {
+  XelorraAccessRevokedError,
+  XelorraAuthError,
+  XelorraInsufficientScopeError,
+} from "./errors.js";
 import { createPkcePair } from "./pkce.js";
 import type {
   AuthorizeUrlOptions,
   ExchangeCodeOptions,
   PkcePair,
   RefreshTokensOptions,
+  VerifyPassportTokenOptions,
   XelorraClientConfig,
+  XelorraDiscoveryDocument,
   XelorraEnvironment,
   XelorraIntrospectionResult,
+  XelorraJwksResponse,
   XelorraKycAssertion,
+  XelorraLogoutResult,
+  XelorraPassportVerificationResult,
+  XelorraPublicRequestOptions,
+  XelorraRevokeResult,
   XelorraTokenSet,
   XelorraUserClaims,
+  XelorraXidAvailabilityResult,
 } from "./types.js";
 
-export const DEFAULT_XELORRA_ISSUER = "https://one.xelorra.app";
-export const DEFAULT_XELORRA_SCOPES = ["profile.read", "passport.read", "email.read"] as const;
+export { DEFAULT_XELORRA_ISSUER, DEFAULT_XELORRA_SCOPES };
 
 const PKCE_STORAGE_PREFIX = "xelorra_pkce_tx_";
 
 interface OAuthErrorPayload {
   error?: string;
   error_description?: string;
+  message?: string;
   reason?: string;
+  required_scopes?: string[];
   [key: string]: unknown;
 }
 
-function normalizeIssuer(issuer?: string): string {
-  const raw = (issuer || DEFAULT_XELORRA_ISSUER).trim();
+function normalizeIssuer(issuer?: string, baseUrl?: string): string {
+  const raw = (issuer || baseUrl || DEFAULT_XELORRA_ISSUER).trim();
   let parsed: URL;
   try {
     parsed = new URL(raw);
   } catch {
-    throw new XelorraAuthError("invalid_config", "issuer must be a valid http(s) URL.");
+    throw new XelorraAuthError("invalid_config", "issuer / baseUrl must be a valid http(s) URL.");
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new XelorraAuthError("invalid_config", "issuer must use https:// or http://.");
+    throw new XelorraAuthError("invalid_config", "issuer / baseUrl must use https:// or http://.");
   }
   return raw.replace(/\/+$/, "");
+}
+
+function resolveFetch(fetchImpl?: typeof fetch): typeof fetch {
+  if (fetchImpl) return fetchImpl;
+  if (typeof globalThis.fetch === "function") {
+    return globalThis.fetch.bind(globalThis);
+  }
+  throw new XelorraAuthError(
+    "fetch_unavailable",
+    "A global fetch implementation (Node.js 18+, browser, Bun, Deno, or fetchImpl) is required.",
+  );
 }
 
 function isAccessRevokedResponse(status: number, body: OAuthErrorPayload): boolean {
@@ -51,14 +80,25 @@ function createResponseError(
 ): XelorraAuthError {
   if (isAccessRevokedResponse(status, body)) {
     return new XelorraAccessRevokedError(
-      body.error_description || "Access to this application has been revoked on Xelorra One.",
+      body.error_description ||
+        body.message ||
+        "Access to this application has been revoked on Xelorra One.",
       typeof body.reason === "string" ? body.reason : undefined,
+      body,
+    );
+  }
+  if (status === 403 && body.error === "insufficient_scope") {
+    return new XelorraInsufficientScopeError(
+      body.error_description ||
+        body.message ||
+        "The access token does not include the required scope for this endpoint.",
+      Array.isArray(body.required_scopes) ? body.required_scopes : undefined,
       body,
     );
   }
   return new XelorraAuthError(
     body.error || fallbackCode,
-    body.error_description || fallbackMessage,
+    body.error_description || body.message || fallbackMessage,
     status,
     body,
   );
@@ -74,6 +114,7 @@ export class XelorraClient {
   readonly clientId: string;
   readonly redirectUri?: string;
   readonly issuer: string;
+  readonly baseUrl: string;
   readonly environment: XelorraEnvironment;
   readonly scopes: string[];
   private readonly clientSecret?: string;
@@ -88,10 +129,11 @@ export class XelorraClient {
     this.clientId = config.clientId.trim();
     this.redirectUri = config.redirectUri?.trim() || undefined;
     this.clientSecret = config.clientSecret?.trim() || undefined;
-    this.issuer = normalizeIssuer(config.issuer);
+    this.issuer = normalizeIssuer(config.issuer, config.baseUrl);
+    this.baseUrl = this.issuer;
     this.environment = config.environment || "production";
     this.scopes = config.scopes?.length ? [...config.scopes] : [...DEFAULT_XELORRA_SCOPES];
-    this.fetchImpl = config.fetchImpl || globalThis.fetch.bind(globalThis);
+    this.fetchImpl = resolveFetch(config.fetchImpl);
   }
 
   /** Returns the current in-memory access token, or `null` when signed out. */
@@ -124,6 +166,16 @@ export class XelorraClient {
       );
     }
     return resolved;
+  }
+
+  /** Fetches the OpenID Connect Discovery document from `GET /.well-known/openid-configuration`. */
+  async fetchDiscovery(): Promise<XelorraDiscoveryDocument> {
+    return fetchDiscovery({ issuer: this.issuer, fetchImpl: this.fetchImpl });
+  }
+
+  /** Fetches the JSON Web Key Set from `GET /.well-known/jwks.json`. */
+  async fetchJwks(): Promise<XelorraJwksResponse> {
+    return fetchJwks({ issuer: this.issuer, fetchImpl: this.fetchImpl });
   }
 
   /**
@@ -166,6 +218,13 @@ export class XelorraClient {
       url: `${this.issuer}/oauth/authorize?${params.toString()}`,
       pkce: { ...pkce, state: finalState },
     };
+  }
+
+  /** Alias for `buildAuthorizeUrl` targeting returning users ("Sign in with Xelorra ID"). */
+  async buildSignInUrl(
+    options?: AuthorizeUrlOptions,
+  ): Promise<{ url: string; pkce: PkcePair }> {
+    return this.buildAuthorizeUrl(options);
   }
 
   /** Backwards-compatible alias for `buildAuthorizeUrl`. */
@@ -256,7 +315,8 @@ export class XelorraClient {
       body: JSON.stringify(payload),
     });
 
-    const body = (await res.json().catch(() => ({}))) as Partial<XelorraTokenSet> & OAuthErrorPayload;
+    const body = (await res.json().catch(() => ({}))) as Partial<XelorraTokenSet> &
+      OAuthErrorPayload;
     if (!res.ok || !body.access_token) {
       throw createResponseError(
         res.status,
@@ -282,7 +342,8 @@ export class XelorraClient {
     codeVerifier?: string;
     redirectUri?: string;
   }): Promise<{ tokens: XelorraTokenSet; user: XelorraUserClaims }> {
-    const urlStr = input?.url ?? (typeof window !== "undefined" ? window.location.href : undefined);
+    const urlStr =
+      input?.url ?? (typeof window !== "undefined" ? window.location.href : undefined);
     const parsedUrl = urlStr ? new URL(urlStr) : null;
 
     const oauthError = parsedUrl?.searchParams.get("error");
@@ -331,7 +392,7 @@ export class XelorraClient {
   }
 
   /**
-   * Exchanges a refresh token for a rotated token set via `POST /oauth/token`.
+   * Exchanges a single-use rotating refresh token for a fresh token set via `POST /oauth/token`.
    * Clears in-memory session state if the refresh token is rejected or revoked.
    */
   async refreshTokens(options?: RefreshTokensOptions): Promise<XelorraTokenSet> {
@@ -358,7 +419,8 @@ export class XelorraClient {
       body: JSON.stringify(payload),
     });
 
-    const body = (await res.json().catch(() => ({}))) as Partial<XelorraTokenSet> & OAuthErrorPayload;
+    const body = (await res.json().catch(() => ({}))) as Partial<XelorraTokenSet> &
+      OAuthErrorPayload;
     if (!res.ok || !body.access_token) {
       this.clearSession();
       throw createResponseError(
@@ -464,8 +526,7 @@ export class XelorraClient {
     }
 
     const active = Boolean(body.active);
-    const connected =
-      typeof body.connected === "boolean" ? body.connected : active;
+    const connected = typeof body.connected === "boolean" ? body.connected : active;
 
     if ((!active || !connected) && token === this.tokens?.access_token) {
       this.clearSession();
@@ -484,27 +545,55 @@ export class XelorraClient {
   }
 
   /**
-   * Retrieves a minimum-disclosure Reusable KYC verification assertion via
-   * `GET /api/v1/verify/assertion`.
+   * Convenience helper returning `true` only when `introspectToken()` confirms both
+   * `active === true` and `connected === true`.
    */
-  async getVerificationAssertion(accessToken?: string): Promise<XelorraKycAssertion> {
+  async isUserConnected(accessToken?: string): Promise<boolean> {
+    const result = await this.introspectToken(accessToken);
+    return result.active && result.connected;
+  }
+
+  /**
+   * Retrieves a minimum-disclosure Reusable KYC verification assertion via
+   * `POST /api/v1/verify/assertion`.
+   *
+   * Requires at least one of: `kyc.assertion.read`, `verification.read`,
+   * `gov.nin.verify`, or `gov.bvn.verify`.
+   * Throws `XelorraInsufficientScopeError` on HTTP 403 `insufficient_scope`.
+   */
+  async verifyKycAssertion(accessToken?: string): Promise<XelorraKycAssertion> {
     const token = accessToken ?? this.tokens?.access_token;
     if (!token) {
       throw new XelorraAuthError("unauthenticated", "No active Xelorra access token.");
     }
 
     const res = await this.fetchImpl(`${this.issuer}/api/v1/verify/assertion`, {
-      method: "GET",
-      headers: { authorization: `Bearer ${token}` },
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({}),
     });
 
-    const body = (await res.json().catch(() => ({}))) as {
+    const body = (await res.json().catch(() => ({}))) as Partial<XelorraKycAssertion> & {
       assertion?: XelorraKycAssertion;
     } & OAuthErrorPayload;
 
-    if (!res.ok || !body.assertion) {
+    if (!res.ok) {
       if (isAccessRevokedResponse(res.status, body) && token === this.tokens?.access_token) {
         this.clearSession();
+      }
+      if (res.status === 403 && body.error === "insufficient_scope") {
+        throw new XelorraInsufficientScopeError(
+          body.error_description ||
+            body.message ||
+            "Access token requires one of: kyc.assertion.read, verification.read, gov.nin.verify, or gov.bvn.verify.",
+          Array.isArray(body.required_scopes)
+            ? body.required_scopes
+            : [...KYC_ASSERTION_SCOPES],
+          body,
+        );
       }
       throw createResponseError(
         res.status,
@@ -514,16 +603,59 @@ export class XelorraClient {
       );
     }
 
-    return body.assertion;
+    const assertion = body.assertion ?? (body as XelorraKycAssertion);
+    if (!assertion || typeof assertion.verification_status !== "string") {
+      throw new XelorraAuthError(
+        "assertion_failed",
+        "Unexpected Reusable KYC assertion payload from Xelorra One.",
+        res.status,
+        body,
+      );
+    }
+
+    return assertion;
+  }
+
+  /** Backwards-compatible alias for `verifyKycAssertion`. */
+  async getVerificationAssertion(accessToken?: string): Promise<XelorraKycAssertion> {
+    return this.verifyKycAssertion(accessToken);
   }
 
   /**
-   * Revokes an access or refresh token via `POST /oauth/revoke` so partner apps
-   * can cleanly disconnect a user back on Xelorra One.
+   * Verifies a member's short-lived rotating Digital Passport QR token without authentication.
+   * Supports both `GET /api/v1/public/verify/:token` (default) and `GET /api/v1/verify/:token`
+   * (when `{ endpoint: "selective" }` is passed).
    */
-  async revokeToken(tokenToRevoke?: string): Promise<void> {
+  async verifyPassportToken(
+    token: string,
+    options?: { endpoint?: "public" | "selective" },
+  ): Promise<XelorraPassportVerificationResult> {
+    return verifyPassportToken(token, {
+      issuer: this.issuer,
+      fetchImpl: this.fetchImpl,
+      endpoint: options?.endpoint,
+    });
+  }
+
+  /**
+   * Checks memorable XID availability via `GET /api/v1/xid/check?username=<handle>` (zero auth).
+   */
+  async checkXidAvailability(username: string): Promise<XelorraXidAvailabilityResult> {
+    return checkXidAvailability(username, {
+      issuer: this.issuer,
+      fetchImpl: this.fetchImpl,
+    });
+  }
+
+  /**
+   * Revokes an access or refresh token via `POST /oauth/revoke` (RFC 7009) so partner apps
+   * keep disconnect state synchronized with Xelorra One.
+   */
+  async revokeToken(tokenToRevoke?: string): Promise<XelorraRevokeResult> {
     const token = tokenToRevoke ?? this.tokens?.refresh_token ?? this.tokens?.access_token;
-    if (!token) return;
+    if (!token) {
+      return { revoked: true };
+    }
 
     const payload: Record<string, string> = {
       token,
@@ -539,8 +671,10 @@ export class XelorraClient {
       body: JSON.stringify(payload),
     });
 
+    const body = (await res.json().catch(() => ({}))) as Partial<XelorraRevokeResult> &
+      OAuthErrorPayload;
+
     if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as OAuthErrorPayload;
       throw createResponseError(
         res.status,
         body,
@@ -548,14 +682,57 @@ export class XelorraClient {
         "Failed to revoke Xelorra token.",
       );
     }
+
+    if (
+      token === this.tokens?.access_token ||
+      token === this.tokens?.refresh_token
+    ) {
+      this.clearSession();
+    }
+
+    return { revoked: body.revoked ?? true };
   }
 
   /**
-   * Revokes the active session on Xelorra One and clears in-memory tokens and user state.
+   * Revokes the active token (`POST /oauth/revoke`), ends the session via `POST /oauth/logout`,
+   * and clears all in-memory tokens and cached user state.
    */
-  async logout(): Promise<void> {
+  async logout(accessToken?: string): Promise<XelorraLogoutResult> {
+    const activeToken = accessToken ?? this.tokens?.access_token;
+    const tokenToRevoke = accessToken ?? this.tokens?.refresh_token ?? this.tokens?.access_token;
+
     try {
-      await this.revokeToken();
+      if (tokenToRevoke) {
+        await this.revokeToken(tokenToRevoke);
+      }
+
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (activeToken) {
+        headers.authorization = `Bearer ${activeToken}`;
+      }
+
+      const res = await this.fetchImpl(`${this.issuer}/oauth/logout`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ client_id: this.clientId }),
+      });
+
+      const body = (await res.json().catch(() => ({}))) as Partial<XelorraLogoutResult> &
+        OAuthErrorPayload;
+
+      if (!res.ok) {
+        throw createResponseError(
+          res.status,
+          body,
+          "logout_failed",
+          "Failed to complete logout on Xelorra One.",
+        );
+      }
+
+      return {
+        loggedOut: body.loggedOut ?? true,
+        message: typeof body.message === "string" ? body.message : undefined,
+      };
     } finally {
       this.clearSession();
     }
@@ -566,12 +743,142 @@ export class XelorraClient {
 export const XelorraAuth = XelorraClient;
 export type XelorraAuth = XelorraClient;
 
+/** Fetches OpenID Connect discovery metadata from `GET /.well-known/openid-configuration`. */
+export async function fetchDiscovery(
+  options?: XelorraPublicRequestOptions,
+): Promise<XelorraDiscoveryDocument> {
+  const issuer = normalizeIssuer(options?.issuer, options?.baseUrl);
+  const fetchImpl = resolveFetch(options?.fetchImpl);
+  const res = await fetchImpl(`${issuer}/.well-known/openid-configuration`, {
+    method: "GET",
+    headers: { accept: "application/json" },
+  });
+  const body = (await res.json().catch(() => ({}))) as XelorraDiscoveryDocument &
+    OAuthErrorPayload;
+  if (!res.ok || !body.issuer) {
+    throw createResponseError(
+      res.status,
+      body,
+      "discovery_failed",
+      "Failed to fetch OpenID Connect discovery document.",
+    );
+  }
+  return body;
+}
+
+/** Fetches the public JWKS document from `GET /.well-known/jwks.json`. */
+export async function fetchJwks(
+  options?: XelorraPublicRequestOptions,
+): Promise<XelorraJwksResponse> {
+  const issuer = normalizeIssuer(options?.issuer, options?.baseUrl);
+  const fetchImpl = resolveFetch(options?.fetchImpl);
+  const res = await fetchImpl(`${issuer}/.well-known/jwks.json`, {
+    method: "GET",
+    headers: { accept: "application/json" },
+  });
+  const body = (await res.json().catch(() => ({}))) as XelorraJwksResponse & OAuthErrorPayload;
+  if (!res.ok || !Array.isArray(body.keys)) {
+    throw createResponseError(
+      res.status,
+      body,
+      "jwks_failed",
+      "Failed to fetch JWKS keys from Xelorra One.",
+    );
+  }
+  return body;
+}
+
+/**
+ * Verifies a rotating Digital Passport QR token without authentication.
+ * Defaults to `GET /api/v1/public/verify/:token`; pass `{ endpoint: "selective" }`
+ * to call `GET /api/v1/verify/:token`.
+ */
+export async function verifyPassportToken(
+  token: string,
+  options?: VerifyPassportTokenOptions,
+): Promise<XelorraPassportVerificationResult> {
+  const trimmed = token.trim();
+  if (!trimmed) {
+    throw new XelorraAuthError("invalid_token", "Passport QR token is required.");
+  }
+
+  const issuer = normalizeIssuer(options?.issuer, options?.baseUrl);
+  const fetchImpl = resolveFetch(options?.fetchImpl);
+  const path =
+    options?.endpoint === "selective"
+      ? `/api/v1/verify/${encodeURIComponent(trimmed)}`
+      : `/api/v1/public/verify/${encodeURIComponent(trimmed)}`;
+
+  const res = await fetchImpl(`${issuer}${path}`, {
+    method: "GET",
+    headers: { accept: "application/json" },
+  });
+
+  const body = (await res.json().catch(() => ({}))) as XelorraPassportVerificationResult &
+    OAuthErrorPayload;
+
+  if (!res.ok && typeof body.valid !== "boolean") {
+    throw createResponseError(
+      res.status,
+      body,
+      "passport_verification_failed",
+      "Failed to verify Digital Passport token.",
+    );
+  }
+
+  return body;
+}
+
+/**
+ * Checks memorable XID handle availability via `GET /api/v1/xid/check?username=<handle>`.
+ */
+export async function checkXidAvailability(
+  username: string,
+  options?: XelorraPublicRequestOptions,
+): Promise<XelorraXidAvailabilityResult> {
+  const trimmed = username.trim();
+  if (!trimmed) {
+    throw new XelorraAuthError("invalid_request", "username is required.");
+  }
+
+  const issuer = normalizeIssuer(options?.issuer, options?.baseUrl);
+  const fetchImpl = resolveFetch(options?.fetchImpl);
+  const query = new URLSearchParams({ username: trimmed });
+
+  const res = await fetchImpl(`${issuer}/api/v1/xid/check?${query.toString()}`, {
+    method: "GET",
+    headers: { accept: "application/json" },
+  });
+
+  const body = (await res.json().catch(() => ({}))) as XelorraXidAvailabilityResult &
+    OAuthErrorPayload;
+
+  if (!res.ok) {
+    throw createResponseError(
+      res.status,
+      body,
+      "xid_check_failed",
+      "Failed to check memorable XID availability.",
+    );
+  }
+
+  return body;
+}
+
 /** Functional helper that builds an OAuth 2.0 + PKCE `S256` authorization URL. */
 export async function buildAuthorizeUrl(
   config: XelorraClientConfig,
   options?: AuthorizeUrlOptions,
 ): Promise<{ url: string; pkce: PkcePair }> {
   return new XelorraClient(config).buildAuthorizeUrl(options);
+}
+
+/** Functional helper that builds a sign-in authorization URL. */
+export async function buildSignInUrl(
+  config: XelorraClientConfig,
+  options?: AuthorizeUrlOptions,
+): Promise<{ url: string; pkce: PkcePair }> {
+  return new XelorraClient(config).buildSignInUrl(options);
 }
 
 /** Functional helper that builds a sign-up authorization URL with `prompt=create`. */
@@ -614,10 +921,34 @@ export async function introspectToken(
   return new XelorraClient(config).introspectToken(accessToken);
 }
 
+/** Functional helper returning `true` only if the user's connection is active and connected. */
+export async function isUserConnected(
+  config: XelorraClientConfig,
+  accessToken: string,
+): Promise<boolean> {
+  return new XelorraClient(config).isUserConnected(accessToken);
+}
+
+/** Functional helper that retrieves a Reusable KYC assertion via `POST /api/v1/verify/assertion`. */
+export async function verifyKycAssertion(
+  config: XelorraClientConfig,
+  accessToken: string,
+): Promise<XelorraKycAssertion> {
+  return new XelorraClient(config).verifyKycAssertion(accessToken);
+}
+
 /** Functional helper that revokes a token on Xelorra One via `POST /oauth/revoke`. */
 export async function revokeToken(
   config: XelorraClientConfig,
   token: string,
-): Promise<void> {
+): Promise<XelorraRevokeResult> {
   return new XelorraClient(config).revokeToken(token);
+}
+
+/** Functional helper that revokes a token and calls `POST /oauth/logout`. */
+export async function logout(
+  config: XelorraClientConfig,
+  accessToken?: string,
+): Promise<XelorraLogoutResult> {
+  return new XelorraClient(config).logout(accessToken);
 }

@@ -1,3 +1,5 @@
+import type { XelorraScope, XelorraWebhookEventType } from "./constants.js";
+
 export type XelorraEnvironment = "development" | "staging" | "production";
 
 /**
@@ -26,16 +28,28 @@ export interface XelorraClientConfig {
   clientSecret?: string;
   /** Base URL of the Xelorra Identity issuer. Defaults to `"https://one.xelorra.app"`. */
   issuer?: string;
+  /** Alias for `issuer`. Takes effect when `issuer` is omitted. */
+  baseUrl?: string;
   /** Target deployment environment label. Defaults to `"production"`. */
   environment?: XelorraEnvironment;
   /** Default OAuth scopes requested during authorization. */
-  scopes?: string[];
+  scopes?: (XelorraScope | (string & {}))[];
   /** Optional custom `fetch` implementation for tests or custom HTTP agents. */
   fetchImpl?: typeof fetch;
 }
 
 /** Backwards-compatible alias for `XelorraClientConfig`. */
 export type XelorraAuthConfig = XelorraClientConfig;
+
+/** Options for public zero-auth helper calls (discovery, JWKS, passport QR verify, XID check). */
+export interface XelorraPublicRequestOptions {
+  /** Base URL of the Xelorra Identity issuer. Defaults to `"https://one.xelorra.app"`. */
+  issuer?: string;
+  /** Alias for `issuer`. */
+  baseUrl?: string;
+  /** Optional custom `fetch` implementation. */
+  fetchImpl?: typeof fetch;
+}
 
 /** RFC 7636 PKCE S256 verifier, challenge, and CSRF state bundle. */
 export interface PkcePair {
@@ -45,10 +59,44 @@ export interface PkcePair {
   state: string;
 }
 
-/** Options accepted by `buildAuthorizeUrl` and `loginWithRedirect`. */
+/** OpenID Connect Discovery document from `GET /.well-known/openid-configuration`. */
+export interface XelorraDiscoveryDocument {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  userinfo_endpoint: string;
+  introspection_endpoint: string;
+  revocation_endpoint: string;
+  end_session_endpoint: string;
+  jwks_uri: string;
+  scopes_supported: string[];
+  code_challenge_methods_supported: string[];
+  [key: string]: unknown;
+}
+
+/** Single JSON Web Key from `GET /.well-known/jwks.json`. */
+export interface XelorraJwk {
+  kty: string;
+  kid?: string;
+  use?: string;
+  alg?: string;
+  n?: string;
+  e?: string;
+  crv?: string;
+  x?: string;
+  y?: string;
+  [key: string]: unknown;
+}
+
+/** JSON Web Key Set from `GET /.well-known/jwks.json`. */
+export interface XelorraJwksResponse {
+  keys: XelorraJwk[];
+}
+
+/** Options accepted by `buildAuthorizeUrl`, `buildSignInUrl`, and `loginWithRedirect`. */
 export interface AuthorizeUrlOptions {
   /** Override default scopes for this authorization request. */
-  scopes?: string[];
+  scopes?: (XelorraScope | (string & {}))[];
   /** Custom CSRF state string. Generated automatically when omitted. */
   state?: string;
   /** Pre-generated PKCE pair. Generated automatically when omitted. */
@@ -57,7 +105,7 @@ export interface AuthorizeUrlOptions {
   redirectUri?: string;
   /** Optional OIDC `prompt` directive (`"create"`, `"login"`, `"consent"`, or `"none"`). */
   prompt?: XelorraPrompt;
-  /** Optional email or Xelorra ID hint to pre-fill on the sign-in screen. */
+  /** Optional email, `XLR-XXXX-XXXX`, or memorable XID (`username.4821`) hint. */
   loginHint?: string;
   /** Additional custom query parameters appended to `/oauth/authorize`. */
   extraParams?: Record<string, string>;
@@ -75,7 +123,7 @@ export interface ExchangeCodeOptions {
 
 /** Options accepted by `refreshTokens`. */
 export interface RefreshTokensOptions {
-  /** Active refresh token issued by Xelorra One. */
+  /** Active single-use rotating refresh token issued by Xelorra One. */
   refreshToken: string;
   /** Optional narrowed scope list for the refreshed token. */
   scope?: string;
@@ -91,17 +139,22 @@ export interface XelorraTokenSet {
   xid?: string | null;
 }
 
-/** Minimum-disclosure Reusable KYC verification assertion. */
+/** Minimum-disclosure Reusable KYC verification assertion from `POST /api/v1/verify/assertion`. */
 export interface XelorraKycAssertion {
   verification_status: "verified" | "pending" | "unverified";
-  verification_level: "none" | "basic" | "verified" | "government_verified";
+  verification_type: "government_identity" | "ecosystem_identity";
   verification_reference: string | null;
   verified_at: string | null;
-  country: string | null;
+  credential_category?: "nin" | "bvn" | "national_id";
+  /** Optional compatibility field when returned by legacy or extended verifiers. */
+  verification_level?: string;
+  country?: string | null;
+  [key: string]: unknown;
 }
 
 /** User identity claims returned by `GET /oauth/userinfo`. */
 export interface XelorraUserClaims {
+  /** Pairwise tenant-isolated subject (`xapp_...`) for third-party apps, or `xid` for first-party apps. */
   sub: string;
   xid?: string;
   name?: string;
@@ -112,8 +165,10 @@ export interface XelorraUserClaims {
   email_verified?: boolean;
   phone_number?: string;
   phone_number_verified?: boolean;
+  address?: Record<string, unknown> | string;
   country?: string;
   verification_level?: string;
+  verification_status?: string;
   membership_status?: string;
   tier?: string;
   kyc_assertion?: XelorraKycAssertion;
@@ -129,48 +184,106 @@ export interface XelorraIntrospectionResult {
   xid: string | null;
   scope: string | null;
   exp: number | null;
-  reason: string | null;
+  reason: "access_revoked" | "account_suspended" | "missing_token" | (string & {}) | null;
+}
+
+/** Response returned by `POST /oauth/revoke`. */
+export interface XelorraRevokeResult {
+  revoked: boolean;
+}
+
+/** Response returned by `POST /oauth/logout`. */
+export interface XelorraLogoutResult {
+  loggedOut: boolean;
+  message?: string;
+}
+
+/** Options for `verifyPassportToken`. */
+export interface VerifyPassportTokenOptions extends XelorraPublicRequestOptions {
+  /**
+   * Choose `"public"` (`GET /api/v1/public/verify/:token`, logs scan to member's
+   * "Who checked my passport" history) or `"selective"` (`GET /api/v1/verify/:token`).
+   * Defaults to `"public"`.
+   */
+  endpoint?: "public" | "selective";
+}
+
+/** Response returned by `GET /api/v1/public/verify/:token` or `GET /api/v1/verify/:token`. */
+export interface XelorraPassportVerificationResult {
+  valid: boolean;
+  reason?: string;
+  xid?: string;
+  name?: string;
+  tier?: string;
+  status?: string;
+  verified?: boolean;
+  memberSince?: string;
+  mode?: string;
+  expiresAt?: string;
+  checkedAt?: string;
+  sharedFields?: string[];
+  disclaimer?: string;
+  [key: string]: unknown;
+}
+
+/** Response returned by `GET /api/v1/xid/check?username=<handle>`. */
+export interface XelorraXidAvailabilityResult {
+  available: boolean;
+  suggestions?: string[];
+  reason?: string;
+  [key: string]: unknown;
 }
 
 /** Payload delivered with a `user.access_revoked` webhook event. */
 export interface XelorraAccessRevokedEventData {
+  xid: string | null;
   sub: string;
-  xid?: string | null;
   client_id: string;
   revoked_at: string;
-  reason?: string | null;
+  reason: "user_disconnected" | (string & {});
   [key: string]: unknown;
 }
 
-/** Payload delivered with a `user.connected` webhook event. */
-export interface XelorraUserConnectedEventData {
-  sub: string;
+/** Payload delivered with `user.permissions_updated` webhook events. */
+export interface XelorraPermissionsUpdatedEventData {
   xid?: string | null;
+  sub: string;
   client_id: string;
   scopes?: string[];
-  connected_at: string;
+  updated_at?: string;
   [key: string]: unknown;
 }
 
-/** Payload delivered with a `user.verification_updated` webhook event. */
-export interface XelorraVerificationUpdatedEventData {
-  sub: string;
+/** Payload delivered with `user.account_suspended` webhook events. */
+export interface XelorraAccountSuspendedEventData {
   xid?: string | null;
+  sub: string;
   client_id?: string;
-  verification_status: XelorraKycAssertion["verification_status"];
-  verification_level: XelorraKycAssertion["verification_level"];
-  updated_at: string;
+  suspended_at?: string;
+  reason?: string;
+  [key: string]: unknown;
+}
+
+/** Payload delivered with verification webhook events (`user.email_verified`, `user.phone_verified`, `user.identity_verified`). */
+export interface XelorraVerificationEventData {
+  xid?: string | null;
+  sub: string;
+  client_id?: string;
+  verification_status?: XelorraKycAssertion["verification_status"];
+  verification_type?: XelorraKycAssertion["verification_type"];
+  verified_at?: string;
   [key: string]: unknown;
 }
 
 /** Generic signed webhook envelope sent by Xelorra One. */
 export interface XelorraWebhookEnvelope<
-  TType extends string = string,
+  TType extends string = XelorraWebhookEventType,
   TData extends Record<string, unknown> = Record<string, unknown>,
 > {
   id: string;
   type: TType;
   created_at: string;
+  client_id: string;
   data: TData;
 }
 
@@ -179,18 +292,39 @@ export type XelorraAccessRevokedWebhookEvent = XelorraWebhookEnvelope<
   XelorraAccessRevokedEventData
 >;
 
-export type XelorraUserConnectedWebhookEvent = XelorraWebhookEnvelope<
-  "user.connected",
-  XelorraUserConnectedEventData
+export type XelorraPermissionsUpdatedWebhookEvent = XelorraWebhookEnvelope<
+  "user.permissions_updated",
+  XelorraPermissionsUpdatedEventData
 >;
 
-export type XelorraVerificationUpdatedWebhookEvent = XelorraWebhookEnvelope<
-  "user.verification_updated",
-  XelorraVerificationUpdatedEventData
+export type XelorraAccountSuspendedWebhookEvent = XelorraWebhookEnvelope<
+  "user.account_suspended",
+  XelorraAccountSuspendedEventData
+>;
+
+export type XelorraIdentityVerifiedWebhookEvent = XelorraWebhookEnvelope<
+  "user.identity_verified",
+  XelorraVerificationEventData
 >;
 
 export type XelorraWebhookEvent =
   | XelorraAccessRevokedWebhookEvent
-  | XelorraUserConnectedWebhookEvent
-  | XelorraVerificationUpdatedWebhookEvent
+  | XelorraPermissionsUpdatedWebhookEvent
+  | XelorraAccountSuspendedWebhookEvent
+  | XelorraIdentityVerifiedWebhookEvent
+  | XelorraWebhookEnvelope<XelorraWebhookEventType, Record<string, unknown>>
   | XelorraWebhookEnvelope<string, Record<string, unknown>>;
+
+/** Options object for `verifyWebhookSignature` and `parseWebhookEvent`. */
+export interface VerifyWebhookOptions {
+  /** Exact raw request payload string or bytes before JSON parsing. */
+  rawBody: string | Uint8Array;
+  /** Value of the `X-Xelorra-Signature` header (`t=<unix_seconds>,v1=<hmac_sha256_hex>`). */
+  signatureHeader: string | null | undefined;
+  /** Signing secret configured for this webhook endpoint in Xelorra Developer Console. */
+  signingSecret: string;
+  /** Maximum allowed timestamp skew in seconds to prevent replay attacks. Defaults to `300`. */
+  toleranceSeconds?: number;
+  /** Optional current Unix timestamp in seconds (primarily for deterministic unit testing). */
+  nowSeconds?: number;
+}

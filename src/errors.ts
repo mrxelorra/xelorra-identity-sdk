@@ -1,9 +1,9 @@
 /**
- * Base error thrown by `@xelorra/identity` when an OAuth 2.0, OIDC,
- * configuration, or API request fails.
+ * Base error thrown by `@xelorra/identity` for configuration, network,
+ * OAuth 2.0, OIDC, KYC, passport verification, or webhook failures.
  */
-export class XelorraAuthError extends Error {
-  /** Machine-readable OAuth or SDK error code (for example `"access_denied"`). */
+export class XelorraError extends Error {
+  /** Machine-readable error code (for example `"access_denied"` or `"insufficient_scope"`). */
   readonly code: string;
   /** HTTP status code returned by Xelorra One when available. */
   readonly status?: number;
@@ -17,10 +17,26 @@ export class XelorraAuthError extends Error {
     details?: Record<string, unknown>,
   ) {
     super(message);
-    this.name = "XelorraAuthError";
+    this.name = "XelorraError";
     this.code = code;
     this.status = status;
     this.details = details;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Error thrown when an OAuth 2.0, OIDC, or authenticated API request fails.
+ */
+export class XelorraAuthError extends XelorraError {
+  constructor(
+    code: string,
+    message: string,
+    status?: number,
+    details?: Record<string, unknown>,
+  ) {
+    super(code, message, status, details);
+    this.name = "XelorraAuthError";
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }
@@ -46,16 +62,37 @@ export class XelorraAccessRevokedError extends XelorraAuthError {
   }
 }
 
+/**
+ * Thrown when Xelorra One responds with HTTP 403 and `error: "insufficient_scope"`.
+ */
+export class XelorraInsufficientScopeError extends XelorraAuthError {
+  /** Optional list of scopes required for the attempted operation. */
+  readonly requiredScopes?: string[];
+
+  constructor(
+    message = "The access token does not include the required scope for this endpoint.",
+    requiredScopes?: string[],
+    details?: Record<string, unknown>,
+  ) {
+    super("insufficient_scope", message, 403, details);
+    this.name = "XelorraInsufficientScopeError";
+    this.requiredScopes = requiredScopes;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
 export type XelorraWebhookSignatureErrorCode =
   | "missing_webhook_secret"
   | "missing_signature"
+  | "malformed_signature"
+  | "expired_timestamp"
   | "invalid_signature"
   | "invalid_payload";
 
 /**
  * Thrown when an incoming Xelorra webhook cannot be authenticated or parsed.
  */
-export class XelorraWebhookSignatureError extends XelorraAuthError {
+export class XelorraWebhookSignatureError extends XelorraError {
   declare readonly code: XelorraWebhookSignatureErrorCode;
 
   constructor(code: XelorraWebhookSignatureErrorCode, message: string) {

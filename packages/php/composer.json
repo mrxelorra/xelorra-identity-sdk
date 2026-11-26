@@ -1,0 +1,37 @@
+{
+  "name": "xelorra/identity-php",
+  "description": "Official PHP 8.1+ SDK for Xelorra Identity (OAuth 2.0, OIDC, PKCE S256, Reusable KYC assertions, Digital Passport QR verification, and signed webhooks on https://one.xelorra.app).",
+  "type": "library",
+  "license": "MIT",
+  "keywords": [
+    "xelorra",
+    "oauth2",
+    "oidc",
+    "pkce",
+    "kyc",
+    "identity",
+    "webhooks"
+  ],
+  "require": {
+    "php": "^8.1",
+    "ext-curl": "*",
+    "ext-json": "*"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.5 || ^11.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "Xelorra\\Identity\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Xelorra\\Identity\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit"
+  },
+  "minimum-stability": "stable"
+}

@@ -6,7 +6,7 @@ const BASE64URL_ALPHABET =
 
 /**
  * Encodes raw bytes to RFC 4648 URL-safe Base64 without padding (`=`).
- * Works identically in browsers, Node.js, Edge workers, and React Native.
+ * Works identically in browsers, Node.js, Bun, Deno, Cloudflare Workers, and React Native.
  */
 export function bytesToBase64Url(bytes: Uint8Array): string {
   let output = "";
@@ -30,7 +30,10 @@ export function bytesToBase64Url(bytes: Uint8Array): string {
 }
 
 async function getRandomBytes(length: number): Promise<Uint8Array> {
-  if (typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.getRandomValues === "function") {
+  if (
+    typeof globalThis.crypto !== "undefined" &&
+    typeof globalThis.crypto.getRandomValues === "function"
+  ) {
     const buffer = new Uint8Array(length);
     globalThis.crypto.getRandomValues(buffer);
     return buffer;
@@ -68,8 +71,9 @@ async function sha256Bytes(input: Uint8Array): Promise<Uint8Array> {
 }
 
 /**
- * Generates an RFC 7636 PKCE `S256` code verifier, code challenge, and CSRF state.
- * Compatible with both browser Web Crypto (`crypto.subtle`) and Node.js `node:crypto`.
+ * Generates an RFC 7636 PKCE `S256` code verifier, code challenge (base64url SHA-256 with no `=` padding),
+ * and cryptographic CSRF `state`.
+ * Compatible with browsers, Node.js 18+, Bun, Deno, and Edge/Cloudflare Workers.
  */
 export async function createPkcePair(): Promise<PkcePair> {
   const verifierBytes = await getRandomBytes(48);

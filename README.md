@@ -1,122 +1,135 @@
-# `@xelorra/identity`
+# Xelorra Identity SDK (`xelorra-identity-sdk`)
 
-Official TypeScript, JavaScript, React, Express, and Next.js SDK for **Xelorra Identity** (`https://one.xelorra.app`).
+Official multi-stack SDK and developer documentation suite for **Xelorra Identity** (`https://one.xelorra.app`).
 
-`@xelorra/identity` implements every live OAuth 2.0, OIDC, and PKCE (`S256`) endpoint on Xelorra One, including direct new-user sign-up (`prompt=create`), token introspection, token revocation, timing-safe HMAC-SHA256 webhook verification, and two-way connection synchronization when users disconnect an app from Xelorra One.
+Integrate OAuth 2.0 + OpenID Connect + PKCE (`S256`), direct new-user sign-up (`prompt=create`), two-way disconnect synchronization, Reusable KYC minimum-disclosure assertions, public Digital Passport QR verification, and timing-safe signed webhooks (`t=<unix_ts>,v1=<hmac_sha256_hex>`) across every modern web, backend, and mobile stack.
 
-## Highlights
+## Supported Stacks & Packages
 
-- **OAuth 2.0 + OIDC + PKCE (`S256`)**: Universal Web Crypto + Node `crypto` PKCE generation targeting `https://one.xelorra.app` by default.
-- **Dedicated Sign Up vs Sign In**: `buildSignUpUrl()` and `signUp()` set `prompt=create` so new users go straight to Xelorra ID registration and return automatically to the OAuth consent screen.
-- **Zero Browser Token Persistence**: Access and refresh tokens are held strictly in memory by default and are never written to `localStorage` or `sessionStorage`.
-- **Two-Way Disconnect Sync**: Built-in `XelorraAccessRevokedError`, `introspectToken()`, `revokeToken()`, `createDisconnectGuard()`, and timing-safe HMAC-SHA256 webhook verification (`X-Xelorra-Signature`).
-- **Modular Framework Sub-Exports**:
-  - `@xelorra/identity` (React-free core client, functional helpers, webhooks, disconnect guard)
-  - `@xelorra/identity/react` (`XelorraProvider`, `useXelorraAuth`, `XelorraAuthButton`)
-  - `@xelorra/identity/express` (callback route, revocation-aware auth middleware, webhook handler)
-  - `@xelorra/identity/next` (Next.js App Router OAuth callback and webhook route handlers)
+| Stack / Ecosystem | Package / Location | Runtime Requirements | Adapter / Examples Included |
+| --- | --- | --- | --- |
+| **TypeScript / JavaScript** | `@xelorra/identity` (repo root, dual ESM + CJS) | Browser, Node.js 18+, Bun, Deno, Edge / Cloudflare Workers | React, Next.js App Router, Express |
+| **PHP** | `xelorra/identity-php` (`packages/php`) | PHP 8.1+ (native `curl`, `json`, `hash_hmac`) | Vanilla PHP (cPanel/shared hosting), Laravel, WordPress, Symfony |
+| **Python** | `xelorra-identity` (`packages/python`) | Python 3.10+ (stdlib only) | FastAPI, Django, Flask |
+| **Go** | `packages/go` (`xelorra`) | Go 1.21+ (stdlib only) | `net/http`, Gin/Chi compatible |
+| **Mobile & Universal REST** | `docs/guides/` | Any HTTP client | React Native / Expo, Flutter, Android (Kotlin), iOS (Swift), cURL / REST |
 
-## Installation
+## Live API Endpoints (`https://one.xelorra.app`)
+
+| Capability | Method & Endpoint | Auth |
+| --- | --- | --- |
+| OIDC Discovery | `GET /.well-known/openid-configuration` | Public |
+| Public Signing Keys | `GET /.well-known/jwks.json` | Public |
+| Authorize / Sign In / Sign Up | `GET /oauth/authorize` (`code_challenge_method=S256`, optional `prompt=create`) | Browser redirect |
+| Token Exchange & Rotation | `POST /oauth/token` (`authorization_code` / `refresh_token`) | Client credentials + PKCE |
+| Scoped User Claims | `GET /oauth/userinfo` | `Bearer <access_token>` |
+| Connection Introspection | `POST /oauth/introspect` (also `GET` with Bearer header) | Token + Client credentials |
+| Token Revocation | `POST /oauth/revoke` (RFC 7009) | Token + Client credentials |
+| Session Logout | `POST /oauth/logout` | Optional Bearer token |
+| Reusable KYC Assertion | `POST /api/v1/verify/assertion` | `Bearer <access_token>` (KYC scope) |
+| Public Passport QR Verify | `GET /api/v1/public/verify/:token` | Public (zero PII, logs scan) |
+| Selective Passport Verify | `GET /api/v1/verify/:token` | Public (zero PII) |
+| Memorable XID Check | `GET /api/v1/xid/check?username=<handle>` | Public |
+
+## 5-Minute Quickstarts
+
+### 1. TypeScript / JavaScript (`@xelorra/identity`)
 
 ```bash
 npm install @xelorra/identity
 ```
 
-## Quick Start
-
-Create a `XelorraClient` instance with your registered `clientId` and `redirectUri`. By default, `issuer` points to `https://one.xelorra.app`.
-
 ```ts
-import { XelorraClient } from "@xelorra/identity";
+import { XelorraClient, XELORRA_SCOPES } from "@xelorra/identity";
 
 export const xelorra = new XelorraClient({
-  clientId: "your-client-id",
+  clientId: process.env.XELORRA_CLIENT_ID!,
+  clientSecret: process.env.XELORRA_CLIENT_SECRET, // server-only
   redirectUri: "https://your-app.com/auth/callback",
-  scopes: ["profile.read", "passport.read", "email.read"],
+  scopes: [
+    XELORRA_SCOPES.PROFILE_READ,
+    XELORRA_SCOPES.PASSPORT_READ,
+    XELORRA_SCOPES.EMAIL_READ,
+  ],
 });
-```
 
-## Sign In vs Sign Up (`prompt=create`)
+// Returning members
+const { url: signInUrl, pkce: signInPkce } = await xelorra.buildSignInUrl();
 
-Use `buildAuthorizeUrl()` / `loginWithRedirect()` for returning users, and `buildSignUpUrl()` / `signUp()` for new users who need to create a Xelorra ID first. Setting `prompt=create` routes users directly to registration on Xelorra One and returns them seamlessly to the OAuth consent screen.
-
-```ts
-// Existing users (Sign In)
-const { url: signInUrl, pkce: signInPkce } = await xelorra.buildAuthorizeUrl();
-
-// New users (Sign Up -> automatic return to OAuth consent)
+// New members (sends directly to registration via prompt=create)
 const { url: signUpUrl, pkce: signUpPkce } = await xelorra.buildSignUpUrl();
 ```
 
-In a browser app, call `xelorra.loginWithRedirect()` or `xelorra.signUp()` directly:
-
-```ts
-await xelorra.loginWithRedirect(); // Sign in
-await xelorra.signUp();            // Sign up (adds prompt=create)
-```
-
-## Browser / React / Vite Integration
-
-Wrap your app with `<XelorraProvider>` from `@xelorra/identity/react`, render sign-in or sign-up buttons with `<XelorraAuthButton>`, and complete the PKCE callback on your redirect route.
+#### React (`@xelorra/identity/react`)
 
 ```tsx
-import { useEffect } from "react";
 import { XelorraClient } from "@xelorra/identity";
 import {
-  XelorraAuthButton,
   XelorraProvider,
-  useXelorraAuth,
+  XelorraSignInButton,
+  XelorraSignUpButton,
+  useXelorraCallback,
 } from "@xelorra/identity/react";
 
-const xelorra = new XelorraClient({
+const client = new XelorraClient({
   clientId: import.meta.env.VITE_XELORRA_CLIENT_ID,
   redirectUri: `${window.location.origin}/auth/callback`,
-  scopes: ["profile.read", "passport.read", "email.read"],
 });
 
-export function App({ children }: { children: React.ReactNode }) {
+export function AuthButtons() {
   return (
-    <XelorraProvider
-      client={xelorra}
-      onAccessRevoked={() => {
-        // Triggered automatically if Xelorra One revokes access
-        window.location.assign("/login?reason=disconnected");
-      }}
-    >
-      {children}
+    <XelorraProvider client={client}>
+      <XelorraSignInButton theme="dark" variant="solid" />
+      <XelorraSignUpButton theme="dark" variant="outline" />
     </XelorraProvider>
   );
 }
 
-export function AuthButtons() {
-  return (
-    <div>
-      <XelorraAuthButton mode="signin" theme="dark" variant="solid" />
-      <XelorraAuthButton mode="signup" theme="dark" variant="outline" />
-    </div>
-  );
-}
-
-export function AuthCallbackPage() {
-  const { handleCallback, isLoading, error } = useXelorraAuth();
-
-  useEffect(() => {
-    void handleCallback().then(() => {
-      window.history.replaceState({}, "", "/dashboard");
-    });
-  }, [handleCallback]);
-
-  if (isLoading) return <p>Completing sign-in...</p>;
-  if (error) return <p>Authentication failed: {error.message}</p>;
+export function CallbackPage() {
+  const { isLoading, error } = useXelorraCallback({
+    onSuccess: () => window.location.assign("/dashboard"),
+  });
+  if (isLoading) return <p>Signing you in...</p>;
+  if (error) return <p>Sign-in failed: {error.message}</p>;
   return null;
 }
 ```
 
-To verify that a browser session is still connected on Xelorra One, call `introspectSession()` from `useXelorraAuth()`. If the user revoked access on Xelorra One, `XelorraProvider` automatically clears local state and invokes `onAccessRevoked`.
+#### Next.js App Router (`@xelorra/identity/next`)
 
-## Node.js / Express Integration
+```ts
+import { XelorraClient } from "@xelorra/identity";
+import {
+  createNextAuthRedirectHandler,
+  createNextCallbackHandler,
+  createNextWebhookHandler,
+} from "@xelorra/identity/next";
 
-Import server helpers from `@xelorra/identity/express`. Never expose `clientSecret` or `XELORRA_WEBHOOK_SECRET` in client code.
+const xelorra = new XelorraClient({
+  clientId: process.env.XELORRA_CLIENT_ID!,
+  clientSecret: process.env.XELORRA_CLIENT_SECRET,
+  redirectUri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/xelorra/callback`,
+});
+
+// app/api/auth/xelorra/signup/route.ts
+export const GET = createNextAuthRedirectHandler({
+  client: xelorra,
+  mode: "signup",
+  saveCodeVerifier: async (pkce) => {
+    await storeVerifierByState(pkce.state, pkce.codeVerifier);
+  },
+});
+
+// app/api/webhooks/xelorra/route.ts
+export const POST = createNextWebhookHandler({
+  signingSecret: process.env.XELORRA_WEBHOOK_SECRET!,
+  onAccessRevoked: async (event) => {
+    await revokeLocalSessionsForSub(event.data.sub);
+  },
+});
+```
+
+#### Express (`@xelorra/identity/express`)
 
 ```ts
 import express from "express";
@@ -128,226 +141,93 @@ import {
 } from "@xelorra/identity/express";
 
 const app = express();
-
 const xelorra = new XelorraClient({
   clientId: process.env.XELORRA_CLIENT_ID!,
   clientSecret: process.env.XELORRA_CLIENT_SECRET,
   redirectUri: "https://api.your-app.com/auth/xelorra/callback",
 });
 
-// 1. OAuth 2.0 + PKCE callback route
-app.get(
-  "/auth/xelorra/callback",
-  createExpressCallbackHandler({
-    client: xelorra,
-    resolveCodeVerifier: async (state, req) => {
-      // Look up the PKCE verifier stored when the login started
-      return lookupPkceVerifier(state);
-    },
-    onSuccess: async ({ tokens, user }, _req, res) => {
-      await saveUserSession(user.sub, tokens);
-      res.status(200).json({ user });
-    },
-  }),
-);
-
-// 2. Protected route with real-time revocation sync via /oauth/introspect
-const requireXelorraAuth = createExpressAuthMiddleware({
-  client: xelorra,
-  cacheTtlMs: 15_000,
-  onRevoked: async ({ introspection }) => {
-    if (introspection?.sub) {
-      await destroyUserSessionBySub(introspection.sub);
-    }
-  },
-});
-
-app.get("/api/me", requireXelorraAuth, (req, res) => {
-  res.json({ session: req.xelorra?.introspection });
-});
-
-// 3. Real-time webhook handler (MUST receive raw JSON bytes for HMAC verification)
 app.post(
   "/webhooks/xelorra",
   express.raw({ type: "application/json" }),
   createExpressWebhookHandler({
-    webhookSecret: process.env.XELORRA_WEBHOOK_SECRET!,
+    signingSecret: process.env.XELORRA_WEBHOOK_SECRET!,
     onAccessRevoked: async (event) => {
-      await destroyUserSessionBySub(event.data.sub);
+      await destroySessionsBySub(event.data.sub);
     },
   }),
 );
 ```
 
-## Next.js App Router Integration
+### 2. PHP (`packages/php`)
 
-Import Web Standard route handlers from `@xelorra/identity/next`.
-
-### OAuth Callback (`app/api/auth/xelorra/callback/route.ts`)
-
-```ts
-import { NextResponse } from "next/server";
-import { XelorraClient } from "@xelorra/identity";
-import { createNextCallbackHandler } from "@xelorra/identity/next";
-
-const xelorra = new XelorraClient({
-  clientId: process.env.XELORRA_CLIENT_ID!,
-  clientSecret: process.env.XELORRA_CLIENT_SECRET,
-  redirectUri: `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/xelorra/callback`,
-});
-
-export const GET = createNextCallbackHandler({
-  client: xelorra,
-  resolveCodeVerifier: async (state) => {
-    return readVerifierCookie(state);
-  },
-  onSuccess: async ({ tokens, user }) => {
-    await persistServerSession(user.sub, tokens);
-    return NextResponse.redirect(new URL("/dashboard", process.env.NEXT_PUBLIC_APP_URL));
-  },
-});
+```bash
+composer require xelorra/identity-php
 ```
 
-### Signed Webhook Route (`app/api/webhooks/xelorra/route.ts`)
+```php
+use Xelorra\Identity\XelorraClient;
+use Xelorra\Identity\Webhook;
 
-```ts
-import { createNextWebhookHandler } from "@xelorra/identity/next";
-
-export const POST = createNextWebhookHandler({
-  webhookSecret: process.env.XELORRA_WEBHOOK_SECRET!,
-  onAccessRevoked: async (event) => {
-    // Runs only after X-Xelorra-Signature HMAC-SHA256 verification succeeds
-    await revokeLocalSessionsForSub(event.data.sub);
-  },
-});
-```
-
-## Keeping Connections in Sync (Webhooks + Introspection)
-
-Xelorra One supports two-way disconnect synchronization:
-
-1. **User disconnects on Xelorra One (push)**: Xelorra One sends a signed `user.access_revoked` webhook to your endpoint with the `X-Xelorra-Signature` header. Use `parseWebhookEvent()` (or the Express/Next.js webhook handlers) to verify the signature and immediately terminate the user's local session.
-2. **Active session checks (pull)**: Use `createDisconnectGuard()` to wrap protected API calls or check `POST /oauth/introspect`. Whenever a token is inactive, disconnected, or returns `401 access_revoked`, `onRevoked()` runs automatically.
-3. **User disconnects inside your app**: Call `client.revokeToken(token)` (or `client.logout()`) to send `POST /oauth/revoke` so the connection is also removed cleanly on Xelorra One.
-
-```ts
-import { XelorraClient, createDisconnectGuard } from "@xelorra/identity";
-
-const xelorra = new XelorraClient({ clientId: process.env.XELORRA_CLIENT_ID! });
-
-const guard = createDisconnectGuard<{ userId: string }>({
-  client: xelorra,
-  getToken: ({ userId }) => loadAccessTokenForUser(userId),
-  onRevoked: async ({ context, reason }) => {
-    await clearLocalSession(context.userId, reason);
-  },
-});
-
-// Check via POST /oauth/introspect
-const status = await guard.check({ userId: "user_42" });
-
-// Or guard a live API call (handles XelorraAccessRevokedError automatically)
-const claims = await guard.run({ userId: "user_42" }, (token) =>
-  xelorra.getUserInfo(token),
-);
-```
-
-### Manual Webhook Verification
-
-```ts
-import {
-  XelorraWebhookSignatureError,
-  parseWebhookEvent,
-  verifyWebhookSignature,
-} from "@xelorra/identity";
-
-const isValid = await verifyWebhookSignature(
-  rawBody,
-  req.headers["x-xelorra-signature"],
-  process.env.XELORRA_WEBHOOK_SECRET!,
+$client = new XelorraClient(
+    clientId: getenv('XELORRA_CLIENT_ID'),
+    redirectUri: 'https://your-site.com/callback.php',
+    clientSecret: getenv('XELORRA_CLIENT_SECRET'),
 );
 
-try {
-  const event = await parseWebhookEvent(
-    rawBody,
-    req.headers["x-xelorra-signature"],
-    process.env.XELORRA_WEBHOOK_SECRET!,
-  );
-
-  if (event.type === "user.access_revoked") {
-    console.log("Revoked subject:", event.data.sub, "at", event.data.revoked_at);
-  }
-} catch (err) {
-  if (err instanceof XelorraWebhookSignatureError) {
-    // Reject with HTTP 401
-  }
-}
+$auth = $client->buildSignUpUrl(); // prompt=create
+$event = Webhook::parseEvent($rawBody, $_SERVER['HTTP_X_XELORRA_SIGNATURE'], getenv('XELORRA_WEBHOOK_SECRET'));
 ```
 
-## Error Handling
+### 3. Python (`packages/python`)
 
-All SDK errors extend `XelorraAuthError`:
-
-- `XelorraAuthError`: Base error with `.code`, `.status`, and `.details`.
-- `XelorraAccessRevokedError`: Thrown when Xelorra One returns HTTP `401` with `error: "access_revoked"`. Includes `.reason`.
-- `XelorraWebhookSignatureError`: Thrown by `parseWebhookEvent()` when the webhook secret or `X-Xelorra-Signature` header is missing, invalid, or the JSON payload is malformed.
-
-```ts
-import {
-  XelorraAccessRevokedError,
-  XelorraAuthError,
-} from "@xelorra/identity";
-
-try {
-  const user = await xelorra.getUserInfo(accessToken);
-} catch (err) {
-  if (err instanceof XelorraAccessRevokedError) {
-    // Clear local session and ask the user to reconnect
-  } else if (err instanceof XelorraAuthError) {
-    console.error("Xelorra error:", err.code, err.status, err.message);
-  }
-}
+```bash
+pip install xelorra-identity
 ```
 
-## API Reference
+```python
+import os
+from xelorra_identity import XelorraClient, parse_webhook_event
 
-### Core Client (`@xelorra/identity`)
+client = XelorraClient(
+    client_id=os.environ["XELORRA_CLIENT_ID"],
+    client_secret=os.getenv("XELORRA_CLIENT_SECRET"),
+    redirect_uri="https://your-app.com/auth/xelorra/callback",
+)
 
-| Export | Endpoint / Purpose |
-| --- | --- |
-| `new XelorraClient(config)` | Main OAuth 2.0 + OIDC + PKCE client (`XelorraAuth` is exported as an alias). Defaults `issuer` to `https://one.xelorra.app`. |
-| `createPkcePair()` | Generates RFC 7636 `S256` `{ codeVerifier, codeChallenge, codeChallengeMethod, state }` using Web Crypto or Node `crypto`. |
-| `client.buildAuthorizeUrl(options?)` | Builds a `GET /oauth/authorize` URL with PKCE `S256`. |
-| `client.buildSignUpUrl(options?)` | Builds a `GET /oauth/authorize` URL with `prompt=create`. |
-| `client.loginWithRedirect(options?)` | Browser redirect to `/oauth/authorize` storing only the ephemeral PKCE verifier in `sessionStorage`. |
-| `client.signUp(options?)` | Browser redirect to `/oauth/authorize` with `prompt=create`. |
-| `client.exchangeCodeForTokens(options)` | Calls `POST /oauth/token` (`grant_type: "authorization_code"`). |
-| `client.refreshTokens(options?)` | Calls `POST /oauth/token` (`grant_type: "refresh_token"`). |
-| `client.getUserInfo(accessToken?)` | Calls `GET /oauth/userinfo`. Throws `XelorraAccessRevokedError` on `401 access_revoked`. |
-| `client.introspectToken(accessToken?)` | Calls `POST /oauth/introspect` and returns `{ active, connected, client_id, sub, xid, scope, exp, reason }`. |
-| `client.revokeToken(token?)` | Calls `POST /oauth/revoke` to disconnect the user back on Xelorra One. |
-| `client.getVerificationAssertion(accessToken?)` | Calls `GET /api/v1/verify/assertion` for Reusable KYC claims. |
-| `client.handleCallback(input?)` | Extracts callback parameters, exchanges the PKCE code, and loads user claims. |
-| `client.logout()` | Revokes the active token on Xelorra One and clears in-memory session state. |
+url, pkce = client.build_sign_up_url()
+```
 
-Functional equivalents (`buildAuthorizeUrl`, `buildSignUpUrl`, `exchangeCodeForTokens`, `refreshTokens`, `getUserInfo`, `introspectToken`, `revokeToken`) are also exported from `@xelorra/identity`.
+### 4. Go (`packages/go`)
 
-### Webhooks & Sync (`@xelorra/identity`)
+```bash
+go get github.com/xelorra/xelorra-identity-sdk/packages/go
+```
 
-| Export | Description |
-| --- | --- |
-| `verifyWebhookSignature(rawBody, signatureHeader, webhookSecret)` | Constant-time HMAC-SHA256 verification against `X-Xelorra-Signature`. Returns `Promise<boolean>`. |
-| `parseWebhookEvent(rawBody, signatureHeader, webhookSecret)` | Verifies signature and returns a typed `XelorraWebhookEvent` (including `user.access_revoked`). |
-| `computeWebhookSignature(rawBody, webhookSecret)` | Generates an HMAC-SHA256 hex digest for testing webhook endpoints. |
-| `createDisconnectGuard({ client, getToken, onRevoked, cacheTtlMs? })` | Synchronizes session revocation using `introspectToken()` and `XelorraAccessRevokedError`. |
+```go
+client, _ := xelorra.NewClient(xelorra.ClientConfig{
+    ClientID:     os.Getenv("XELORRA_CLIENT_ID"),
+    ClientSecret: os.Getenv("XELORRA_CLIENT_SECRET"),
+    RedirectURI:  "https://your-app.com/auth/xelorra/callback",
+})
+signUpURL, pkce, _ := client.BuildSignUpURL(nil)
+```
 
-### Framework Adapters
+## Developer Documentation Index
 
-- `@xelorra/identity/react`: `XelorraProvider`, `useXelorraAuth`, `XelorraAuthButton`
-- `@xelorra/identity/express`: `createExpressCallbackHandler`, `createExpressAuthMiddleware`, `createExpressWebhookHandler`
-- `@xelorra/identity/next`: `createNextCallbackHandler`, `createNextWebhookHandler`
+- **[Quickstart Guide](docs/QUICKSTART.md)**: End-to-end setup from Developer Console (`console.one.xelorra.app`) registration to your first authenticated session.
+- **[Sign Up vs Sign In](docs/SIGNUP_AND_SIGNIN.md)**: Using `prompt=create` for new members, plus how email, system Xelorra ID (`XLR-XXXX-XXXX`), and memorable XID (`username.4821`) sign-in work.
+- **[Two-Way Connection Sync](docs/TWO_WAY_SYNC.md)**: Combining `user.access_revoked` webhooks, `POST /oauth/introspect`, `401 access_revoked` handling, and `POST /oauth/revoke`.
+- **[Scopes & Reusable KYC](docs/SCOPES_AND_KYC.md)**: All 14 scopes across Levels 1 to 5, pairwise `sub` isolation, NDPA consent withdrawal, and `POST /api/v1/verify/assertion`.
+- **[Signed Webhooks](docs/WEBHOOKS.md)**: All 11 webhook events, `t=<ts>,v1=<hex>` signature verification in Node.js, PHP, Python, and Go, and replay protection.
+- **[Digital Passport QR Verification](docs/PASSPORT_VERIFICATION.md)**: Zero-auth, zero-PII verification via `/api/v1/public/verify/:token` and `/api/v1/verify/:token`, plus memorable XID availability checks.
+- **[PHP Integration Guide](docs/PHP_INTEGRATION.md)**: Vanilla PHP, Laravel, WordPress, and Symfony.
+- **[Python Integration Guide](docs/PYTHON_INTEGRATION.md)**: FastAPI, Django, and Flask.
+- **[Go Integration Guide](docs/GO_INTEGRATION.md)**: `net/http` handlers, middleware, and webhook verification.
+- **[Mobile & Universal REST Guide](docs/MOBILE_AND_REST.md)**: Overview and links to [React Native / Expo](docs/guides/REACT_NATIVE_EXPO.md), [Flutter](docs/guides/FLUTTER.md), [Android (Kotlin)](docs/guides/ANDROID_KOTLIN.md), [iOS (Swift)](docs/guides/IOS_SWIFT.md), and [cURL / REST](docs/guides/CURL_REST.md).
+- **[Errors & Troubleshooting](docs/ERRORS_AND_TROUBLESHOOTING.md)**: HTTP status reference (`400`, `401`, `403`, `404`, `409`, `429`, `501`), PKCE padding traps, redirect URI rules, and zero-downtime secret rotation.
 
-## Development
+## Local Development & Verification
 
 ```bash
 npm install
@@ -355,6 +235,7 @@ npm run typecheck
 npm run lint
 npm test
 npm run build
+npm run dev   # Launches the local interactive SDK playground on http://localhost:3000
 ```
 
 ## License

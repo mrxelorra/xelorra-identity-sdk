@@ -2,7 +2,9 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -13,6 +15,7 @@ import type {
   AuthorizeUrlOptions,
   XelorraIntrospectionResult,
   XelorraKycAssertion,
+  XelorraLogoutResult,
   XelorraTokenSet,
   XelorraUserClaims,
 } from "./types.js";
@@ -26,12 +29,15 @@ export interface XelorraContextValue {
   isLoading: boolean;
   error: Error | null;
   loginWithRedirect: (options?: AuthorizeUrlOptions) => Promise<void>;
+  signIn: (options?: AuthorizeUrlOptions) => Promise<void>;
   signUp: (options?: Omit<AuthorizeUrlOptions, "prompt">) => Promise<void>;
   handleCallback: (url?: string) => Promise<XelorraUserClaims>;
   refreshSession: () => Promise<XelorraTokenSet>;
   introspectSession: () => Promise<XelorraIntrospectionResult>;
+  verifyKycAssertion: () => Promise<XelorraKycAssertion>;
+  /** Alias for `verifyKycAssertion`. */
   getVerificationAssertion: () => Promise<XelorraKycAssertion>;
-  logout: () => Promise<void>;
+  logout: () => Promise<XelorraLogoutResult>;
 }
 
 export interface XelorraProviderProps {
@@ -75,7 +81,8 @@ export function XelorraProvider({
       try {
         await client.loginWithRedirect(options);
       } catch (err) {
-        const normalized = err instanceof Error ? err : new Error("Failed to start Xelorra login.");
+        const normalized =
+          err instanceof Error ? err : new Error("Failed to start Xelorra login.");
         setError(normalized);
         setIsLoading(false);
         throw normalized;
@@ -141,9 +148,9 @@ export function XelorraProvider({
     return result;
   }, [client, onAccessRevoked]);
 
-  const getVerificationAssertion = useCallback(async () => {
+  const verifyKycAssertion = useCallback(async () => {
     try {
-      return await client.getVerificationAssertion();
+      return await client.verifyKycAssertion();
     } catch (err) {
       handlePotentialRevocation(err);
       throw err;
@@ -153,9 +160,10 @@ export function XelorraProvider({
   const logout = useCallback(async () => {
     setIsLoading(true);
     try {
-      await client.logout();
+      const result = await client.logout();
       setTokens(null);
       setUser(null);
+      return result;
     } finally {
       setIsLoading(false);
     }
@@ -170,11 +178,13 @@ export function XelorraProvider({
       isLoading,
       error,
       loginWithRedirect,
+      signIn: loginWithRedirect,
       signUp,
       handleCallback,
       refreshSession,
       introspectSession,
-      getVerificationAssertion,
+      verifyKycAssertion,
+      getVerificationAssertion: verifyKycAssertion,
       logout,
     }),
     [
@@ -188,7 +198,7 @@ export function XelorraProvider({
       handleCallback,
       refreshSession,
       introspectSession,
-      getVerificationAssertion,
+      verifyKycAssertion,
       logout,
     ],
   );
@@ -207,6 +217,46 @@ export function useXelorraAuth(): XelorraContextValue {
   return ctx;
 }
 
+export interface UseXelorraCallbackOptions {
+  /** Callback invoked after PKCE code exchange and userinfo load succeed. */
+  onSuccess?: (user: XelorraUserClaims) => void;
+  /** Callback invoked if the OAuth callback returns an error or exchange fails. */
+  onError?: (error: Error) => void;
+  /** Optional explicit callback URL (defaults to `window.location.href`). */
+  url?: string;
+}
+
+/**
+ * React hook for completing the OAuth 2.0 + PKCE callback exactly once on mount
+ * (safe under React 18/19 StrictMode double-invocation).
+ */
+export function useXelorraCallback(options?: UseXelorraCallbackOptions): {
+  isLoading: boolean;
+  user: XelorraUserClaims | null;
+  error: Error | null;
+} {
+  const { handleCallback, user, isLoading, error } = useXelorraAuth();
+  const hasRunRef = useRef(false);
+  const callbacksRef = useRef(options);
+  callbacksRef.current = options;
+
+  useEffect(() => {
+    if (hasRunRef.current) return;
+    hasRunRef.current = true;
+
+    void handleCallback(callbacksRef.current?.url)
+      .then((claims) => {
+        callbacksRef.current?.onSuccess?.(claims);
+      })
+      .catch((err) => {
+        const normalized = err instanceof Error ? err : new Error("Xelorra callback failed.");
+        callbacksRef.current?.onError?.(normalized);
+      });
+  }, [handleCallback]);
+
+  return { isLoading, user, error };
+}
+
 export interface XelorraAuthButtonProps {
   client?: XelorraClient;
   /** Choose `"signin"` (default) or `"signup"` (sets `prompt=create` for new Xelorra IDs). */
@@ -216,6 +266,7 @@ export interface XelorraAuthButtonProps {
   variant?: "solid" | "outline";
   showLogo?: boolean;
   scopes?: string[];
+  loginHint?: string;
   className?: string;
   disabled?: boolean;
   onError?: (error: Error) => void;
@@ -233,6 +284,7 @@ export function XelorraAuthButton({
   variant = "solid",
   showLogo = true,
   scopes,
+  loginHint,
   className,
   disabled = false,
   onError,
@@ -241,7 +293,7 @@ export function XelorraAuthButton({
   const [busy, setBusy] = useState(false);
 
   const resolvedLabel =
-    label ?? (mode === "signup" ? "Sign up with Xelorra" : "Continue with Xelorra");
+    label ?? (mode === "signup" ? "Sign up with Xelorra ID" : "Sign in with Xelorra ID");
   const isDark = theme === "dark";
   const isSolid = variant === "solid";
 
@@ -279,12 +331,13 @@ export function XelorraAuthButton({
     setBusy(true);
     try {
       if (mode === "signup") {
-        await activeClient.signUp({ scopes });
+        await activeClient.signUp({ scopes, loginHint });
       } else {
-        await activeClient.loginWithRedirect({ scopes });
+        await activeClient.loginWithRedirect({ scopes, loginHint });
       }
     } catch (err) {
-      const normalized = err instanceof Error ? err : new Error("Unable to start Xelorra sign-in.");
+      const normalized =
+        err instanceof Error ? err : new Error("Unable to start Xelorra sign-in.");
       onError?.(normalized);
       setBusy(false);
     }
@@ -309,4 +362,14 @@ export function XelorraAuthButton({
       <span>{busy ? "Redirecting to Xelorra..." : resolvedLabel}</span>
     </button>
   );
+}
+
+/** Dedicated "Sign in with Xelorra ID" button component. */
+export function XelorraSignInButton(props: Omit<XelorraAuthButtonProps, "mode">) {
+  return <XelorraAuthButton {...props} mode="signin" />;
+}
+
+/** Dedicated "Sign up with Xelorra ID" button component (automatically sets `prompt=create`). */
+export function XelorraSignUpButton(props: Omit<XelorraAuthButtonProps, "mode">) {
+  return <XelorraAuthButton {...props} mode="signup" />;
 }

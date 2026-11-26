@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xelorra-identity"
+version = "2.0.0"
+description = "Official Python 3.10+ SDK for Xelorra Identity (OAuth 2.0, OIDC, PKCE S256, Reusable KYC assertions, Digital Passport QR verification, and signed webhooks on https://one.xelorra.app)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["xelorra", "oauth2", "oidc", "pkce", "kyc", "identity", "webhooks"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["xelorra_identity*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

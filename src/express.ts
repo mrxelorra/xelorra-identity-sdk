@@ -26,6 +26,7 @@ export interface ExpressRequestLike {
 export interface ExpressResponseLike {
   status: (code: number) => ExpressResponseLike;
   json: (payload: unknown) => unknown;
+  redirect?: (url: string) => unknown;
 }
 
 export type ExpressNextFunction = (err?: unknown) => void;
@@ -53,7 +54,9 @@ function readQueryParam(query: Record<string, unknown> | undefined, key: string)
   return "";
 }
 
-export interface ExpressCallbackHandlerOptions<TReq extends ExpressRequestLike = ExpressRequestLike> {
+export interface ExpressCallbackHandlerOptions<
+  TReq extends ExpressRequestLike = ExpressRequestLike,
+> {
   client: XelorraClient;
   /** Resolve the PKCE `codeVerifier` stored in your session/cookie for the given `state`. */
   resolveCodeVerifier: (
@@ -119,12 +122,18 @@ export function createExpressCallbackHandler<
   };
 }
 
-export interface ExpressAuthMiddlewareOptions<TReq extends ExpressRequestLike = ExpressRequestLike> {
+export interface ExpressAuthMiddlewareOptions<
+  TReq extends ExpressRequestLike = ExpressRequestLike,
+> {
   client: XelorraClient;
   /**
    * Resolves the user's Xelorra access token from the request.
    * Defaults to parsing `Authorization: Bearer <token>`.
    */
+  getAccessToken?: (
+    req: TReq,
+  ) => string | null | undefined | Promise<string | null | undefined>;
+  /** Backwards-compatible alias for `getAccessToken`. */
   getToken?: (req: TReq) => string | null | undefined | Promise<string | null | undefined>;
   /** Called automatically when Xelorra One reports the connection has been revoked. */
   onRevoked?: (info: {
@@ -145,6 +154,7 @@ export function createExpressAuthMiddleware<
   TReq extends ExpressRequestLike = ExpressRequestLike,
 >(options: ExpressAuthMiddlewareOptions<TReq>): ExpressHandler<TReq> {
   const resolveToken =
+    options.getAccessToken ??
     options.getToken ??
     ((req: TReq) => {
       const header = readHeader(req.headers, "authorization");
@@ -154,7 +164,7 @@ export function createExpressAuthMiddleware<
 
   const guard = createDisconnectGuard<TReq>({
     client: options.client,
-    getToken: resolveToken,
+    getAccessToken: resolveToken,
     cacheTtlMs: options.cacheTtlMs,
     onRevoked: async ({ reason, introspection, context }) => {
       await options.onRevoked?.({ reason, introspection, req: context });
@@ -180,8 +190,15 @@ export function createExpressAuthMiddleware<
   };
 }
 
-export interface ExpressWebhookHandlerOptions<TReq extends ExpressRequestLike = ExpressRequestLike> {
-  webhookSecret: string;
+export interface ExpressWebhookHandlerOptions<
+  TReq extends ExpressRequestLike = ExpressRequestLike,
+> {
+  /** Signing secret from Xelorra Developer Console. */
+  signingSecret?: string;
+  /** Backwards-compatible alias for `signingSecret`. */
+  webhookSecret?: string;
+  /** Maximum timestamp skew in seconds (defaults to `300`). */
+  toleranceSeconds?: number;
   /** Called for `user.access_revoked` events after signature verification succeeds. */
   onAccessRevoked?: (
     event: XelorraAccessRevokedWebhookEvent,
@@ -202,6 +219,8 @@ export interface ExpressWebhookHandlerOptions<TReq extends ExpressRequestLike = 
 export function createExpressWebhookHandler<
   TReq extends ExpressRequestLike = ExpressRequestLike,
 >(options: ExpressWebhookHandlerOptions<TReq>): ExpressHandler<TReq> {
+  const secret = options.signingSecret ?? options.webhookSecret ?? "";
+
   return async (req, res) => {
     try {
       const rawBody =
@@ -219,7 +238,12 @@ export function createExpressWebhookHandler<
       }
 
       const signature = readHeader(req.headers, XELORRA_SIGNATURE_HEADER);
-      const event = await parseWebhookEvent(rawBody, signature, options.webhookSecret);
+      const event = await parseWebhookEvent({
+        rawBody,
+        signatureHeader: signature,
+        signingSecret: secret,
+        toleranceSeconds: options.toleranceSeconds,
+      });
 
       if (event.type === "user.access_revoked" && options.onAccessRevoked) {
         await options.onAccessRevoked(event as XelorraAccessRevokedWebhookEvent, req);

@@ -1,36 +1,41 @@
 {
   "name": "@xelorra/identity",
-  "version": "1.0.0",
-  "description": "Official Xelorra Identity OAuth 2.0 + OIDC + PKCE, webhook verification, and React/Express/Next.js SDK.",
+  "version": "2.0.0",
+  "description": "Official multi-stack Xelorra Identity SDK for OAuth 2.0, OIDC, PKCE S256, Reusable KYC assertions, Digital Passport verification, and signed webhooks on https://one.xelorra.app.",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/cjs/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/cjs/index.js"
     },
     "./react": {
       "types": "./dist/react.d.ts",
-      "import": "./dist/react.js"
+      "import": "./dist/react.js",
+      "require": "./dist/cjs/react.js"
     },
     "./express": {
       "types": "./dist/express.d.ts",
-      "import": "./dist/express.js"
+      "import": "./dist/express.js",
+      "require": "./dist/cjs/express.js"
     },
     "./next": {
       "types": "./dist/next.d.ts",
-      "import": "./dist/next.js"
+      "import": "./dist/next.js",
+      "require": "./dist/cjs/next.js"
     }
   },
   "files": [
     "dist",
+    "docs",
     "README.md"
   ],
   "scripts": {
     "dev": "node dev-server.mjs",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finalize-cjs.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "test": "tsx --test src/client.test.ts"
